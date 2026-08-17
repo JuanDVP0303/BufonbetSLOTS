@@ -352,10 +352,21 @@ export class SlotScene extends Phaser.Scene {
     }
   }
 
+  // Códigos REALES de los símbolos del casino, preferentemente los que YA tienen
+  // textura cargada, para que el desenfoque del giro use las imágenes subidas y no
+  // caiga a los iconos por defecto. Si ninguno tiene imagen, usa todos los códigos.
+  private symbolPool(): string[] {
+    const codes = (this.runtime.theme?.symbols ?? []).map((s) => s.code);
+    if (codes.length === 0) return SYMBOLS as unknown as string[];
+    const withArt = codes.filter((c) => this.textures.exists(`sym-${c}`));
+    return withArt.length ? withArt : codes;
+  }
+
   private buildReels() {
     this.reels = [];
+    const pool = this.symbolPool();
     for (let c = 0; c < this.cols; c++) {
-      this.reels.push(new Reel(this, this.gridX + c * this.size, this.gridY, c, this.rows, this.size));
+      this.reels.push(new Reel(this, this.gridX + c * this.size, this.gridY, c, this.rows, this.size, pool));
     }
   }
 
@@ -733,7 +744,7 @@ export class SlotScene extends Phaser.Scene {
   }
 
   private randomColumn(): string[] {
-    const pool = SYMBOLS as unknown as string[];
+    const pool = this.symbolPool();
     return Array.from({ length: this.rows }, () => Phaser.Utils.Array.GetRandom(pool));
   }
 

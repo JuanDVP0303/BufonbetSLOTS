@@ -34,15 +34,19 @@ export class Reel {
     topY: number,
     private colIndex: number,
     rows: number,
-    symbolSize: number
+    symbolSize: number,
+    // Códigos REALES del casino para el desenfoque del giro (los que tienen imagen).
+    // Si no se pasan, cae a los símbolos por defecto (evita mostrar placeholders al girar).
+    blurPool?: string[]
   ) {
     this.scene = scene;
     this.rows = rows;
     this.size = symbolSize;
     this.container = scene.add.container(x, topY);
 
+    const pool = blurPool && blurPool.length ? blurPool : (SYMBOLS as unknown as string[]);
     for (let i = 0; i < this.L; i++) {
-      this.strip.push(Phaser.Utils.Array.GetRandom(SYMBOLS as unknown as string[]));
+      this.strip.push(Phaser.Utils.Array.GetRandom(pool));
     }
 
     const frameSize = this.size;
