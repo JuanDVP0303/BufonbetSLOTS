@@ -441,7 +441,10 @@ class EmbedSpinView(APIView):
                 with transaction.atomic():
                     ps = PlayerSession.objects.select_for_update().get(pk=session.player_session_id)
                     if ps.demo_balance < charge:
-                        return Response({"detail": "Saldo insuficiente."}, status=status.HTTP_400_BAD_REQUEST)
+                        return Response(
+                            {"detail": "Saldo insuficiente.", "code": "insufficient_funds"},
+                            status=status.HTTP_402_PAYMENT_REQUIRED,
+                        )
                     spin, outcome, meta = execute_spin(
                         game_session=session, bet_amount=bet, idempotency_key=idem
                     )
@@ -449,7 +452,10 @@ class EmbedSpinView(APIView):
                     ps.save(update_fields=["demo_balance"])
                 balance = ps.demo_balance
         except InsufficientWalletFunds:
-            return Response({"detail": "Saldo insuficiente."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": "Saldo insuficiente.", "code": "insufficient_funds"},
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
         except WalletError as exc:
             return Response({"detail": f"Billetera del operador: {exc}"}, status=status.HTTP_502_BAD_GATEWAY)
         except (ValidationError, RTPConfigError) as exc:
@@ -546,7 +552,10 @@ class PlaySpinView(APIView):
                 game_session=session, bet_amount=data["bet_amount"]
             )
         except InsufficientFunds as exc:
-            return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+            return Response(
+                {"detail": str(exc), "code": "insufficient_funds"},
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
         except (ValidationError, RTPConfigError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -680,6 +689,35 @@ class GameBuildView(APIView):
         except (ValidationError, ValueError) as exc:
             return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
         return Response(_game_row(game), status=status.HTTP_201_CREATED)
+
+
+class GameDetailView(APIView):
+    """(Master) Borra un casino. Solo si NO tiene giros (la auditoría es inmutable).
+
+    Borra en cascada su configuración (símbolos, pagos, bandas, líneas, apuestas,
+    jackpot, tiradas gratis). Las FKs PROTECT (RTPConfiguration, GameSession) se
+    limpian explícitamente antes. Si el casino ya se jugó, se rechaza: desactívalo.
+    """
+
+    permission_classes = [IsMaster]
+
+    def delete(self, request, slug):
+        from django.db import transaction
+
+        from app_rtp.models import RTPConfiguration
+
+        game = get_object_or_404(Game, slug=slug)
+        if Spin.objects.filter(game=game).exists():
+            return Response(
+                {"detail": "El casino tiene giros registrados; no se puede borrar. "
+                           "Desactívalo para dejar de ofrecerlo (la auditoría es inmutable)."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        with transaction.atomic():
+            GameSession.objects.filter(game=game).delete()   # sin giros: seguro
+            RTPConfiguration.objects.filter(game=game).delete()
+            game.delete()   # cascada: símbolos, pagos, bandas, líneas, apuestas, etc.
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class GameSimulateView(APIView):

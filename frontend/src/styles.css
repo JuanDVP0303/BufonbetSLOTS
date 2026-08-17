@@ -969,6 +969,42 @@ code {
 .op-detail-id h2 { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .op-stat-cards { margin: 14px 0 4px; }
 .op-detail-id code { font-size: 0.85em; opacity: 0.85; }
+
+/* Botón de peligro (borrar casino). */
+.btn.danger { color: #ffb4bd; border-color: rgba(239, 71, 111, 0.4); }
+.btn.danger:hover { background: rgba(239, 71, 111, 0.15); border-color: #ef476f; }
+
+/* Modal de saldo insuficiente (iframe del juego). */
+.lowbal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 8, 18, 0.72);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 9999;
+  padding: 20px;
+  animation: lowbal-fade 0.18s ease-out;
+}
+@keyframes lowbal-fade { from { opacity: 0; } to { opacity: 1; } }
+.lowbal-card {
+  background: linear-gradient(180deg, #182238, #0e1526);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 18px;
+  padding: 30px 26px;
+  max-width: 360px;
+  width: 100%;
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  animation: lowbal-pop 0.2s ease-out;
+}
+@keyframes lowbal-pop { from { transform: scale(0.92); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+.lowbal-icon { font-size: 52px; line-height: 1; margin-bottom: 8px; }
+.lowbal-card h3 { margin: 6px 0 10px; font-size: 1.35rem; }
+.lowbal-card p { margin: 6px 0; color: rgba(255, 255, 255, 0.75); }
+.lowbal-balance { font-size: 0.95rem; }
+.lowbal-btn { margin-top: 18px; width: 100%; }
 .fs-retrigger { white-space: nowrap; }
 
 /* ================= Toast / notificaciones ================= */

@@ -3,9 +3,11 @@ const BASE = import.meta.env.VITE_API_BASE ?? "";
 
 export class ApiError extends Error {
   status: number;
-  constructor(message: string, status: number) {
+  code?: string;
+  constructor(message: string, status: number, code?: string) {
     super(message);
     this.status = status;
+    this.code = code;
   }
 }
 
@@ -35,8 +37,8 @@ export async function apiFetch<T>(path: string, opts: Options = {}): Promise<T> 
     data = null;
   }
   if (!res.ok) {
-    const detail = (data as { detail?: string } | null)?.detail;
-    throw new ApiError(detail ?? `HTTP ${res.status}`, res.status);
+    const err = data as { detail?: string; code?: string } | null;
+    throw new ApiError(err?.detail ?? `HTTP ${res.status}`, res.status, err?.code);
   }
   return data as T;
 }
@@ -54,8 +56,8 @@ export async function apiUpload<T>(path: string, formData: FormData, token?: str
     data = null;
   }
   if (!res.ok) {
-    const detail = (data as { detail?: string } | null)?.detail;
-    throw new ApiError(detail ?? `HTTP ${res.status}`, res.status);
+    const err = data as { detail?: string; code?: string } | null;
+    throw new ApiError(err?.detail ?? `HTTP ${res.status}`, res.status, err?.code);
   }
   return data as T;
 }

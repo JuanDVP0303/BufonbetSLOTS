@@ -9,6 +9,7 @@ import {
   SimResult,
   SymbolSpec,
   buildGame,
+  deleteGame,
   grantFreeRounds,
   listCurrencies,
   listGames,
@@ -450,6 +451,17 @@ export default function MasterCasinosPage() {
     catch (err) { notify(err instanceof Error ? err.message : "Error al subir"); }
   }
 
+  async function removeGame(g: GameRow) {
+    if (!window.confirm(`¿Borrar el casino "${g.title || g.name}"? Esto elimina su configuración (símbolos, pagos, bandas). No se puede deshacer.`)) return;
+    try {
+      await deleteGame(token!, g.slug);
+      await load();
+      notify(`Casino "${g.title || g.name}" borrado.`, "ok");
+    } catch (err) {
+      notify(err instanceof Error ? err.message : "Error al borrar");
+    }
+  }
+
   const codes = codeMap(symbols); // códigos autogenerados (para mostrar/enlazar pagos)
 
   return (
@@ -665,6 +677,9 @@ export default function MasterCasinosPage() {
                 </div>
                 <button className="btn ghost btn-small sim-btn" onClick={() => runSim(g.slug)} disabled={sim === "loading"}>
                   {sim === "loading" ? "Simulando…" : "Simular RTP"}
+                </button>
+                <button className="btn ghost btn-small danger" onClick={() => removeGame(g)} title="Borrar casino">
+                  🗑 Borrar
                 </button>
               </div>
 

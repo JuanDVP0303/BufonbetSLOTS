@@ -221,6 +221,9 @@ export interface GameThemePatch {
 export const updateGameTheme = (token: string, slug: string, body: GameThemePatch) =>
   apiFetch<GameRow>(`/master/games/${slug}/theme/`, { method: "PATCH", body, token });
 
+export const deleteGame = (token: string, slug: string) =>
+  apiFetch<null>(`/master/games/${slug}/`, { method: "DELETE", token });
+
 export function uploadGameAsset(token: string, slug: string, field: string, file: File) {
   const fd = new FormData();
   fd.append("file", file);

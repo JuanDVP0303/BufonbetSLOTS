@@ -780,7 +780,10 @@ export class SlotScene extends Phaser.Scene {
       this.updateFreeSpins(resp);
     } catch (err) {
       await Promise.all(this.reels.map((reel, c) => reel.stop(this.randomColumn(), c * 150)));
-      this.flashMessage(err instanceof Error ? err.message : "Error de red", "#ef476f");
+      // Si React maneja el error (p. ej. modal de saldo insuficiente), no mostramos el
+      // mensaje rojo genérico dentro del canvas.
+      const handled = this.runtime.onSpinError?.(err) === true;
+      if (!handled) this.flashMessage(err instanceof Error ? err.message : "Error de red", "#ef476f");
       this.stopAuto(); // ante un error (p.ej. saldo insuficiente) se detiene el autoplay
     } finally {
       this.busy = false;

@@ -8,6 +8,7 @@ interface Props {
   spin: (betAmount: number) => Promise<SpinResponse>;
   betAmount: number;
   onBalance?: (balance: number) => void;
+  onSpinError?: (err: unknown) => boolean;
   theme?: Theme;
   grid?: { cols: number; rows: number };
   balance?: number;
@@ -29,6 +30,7 @@ export default function SlotGameCanvas({
   spin,
   betAmount,
   onBalance,
+  onSpinError,
   theme,
   grid,
   balance,
@@ -44,8 +46,10 @@ export default function SlotGameCanvas({
   const gameRef = useRef<Phaser.Game | null>(null);
   const spinRef = useRef(spin);
   const balanceRef = useRef(onBalance);
+  const errorRef = useRef(onSpinError);
   spinRef.current = spin;
   balanceRef.current = onBalance;
+  errorRef.current = onSpinError;
 
   useEffect(() => {
     if (!parentRef.current || gameRef.current) return;
@@ -64,6 +68,7 @@ export default function SlotGameCanvas({
         betMax,
         spin: (bet) => spinRef.current(bet),
         onBalance: (b) => balanceRef.current?.(b),
+        onSpinError: (err) => errorRef.current?.(err) ?? false,
       })
     );
     gameRef.current = game;

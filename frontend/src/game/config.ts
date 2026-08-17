@@ -13,6 +13,9 @@ export interface RuntimeConfig {
   betAmount: number;
   spin: (betAmount: number) => Promise<SpinResponse>;
   onBalance?: (balance: number) => void;
+  // Devuelve true si React "manejó" el error (p. ej. mostró un modal de saldo):
+  // en ese caso la escena NO muestra su mensaje rojo genérico.
+  onSpinError?: (err: unknown) => boolean;
   theme?: Theme;
   grid?: { cols: number; rows: number };
   balance?: number;

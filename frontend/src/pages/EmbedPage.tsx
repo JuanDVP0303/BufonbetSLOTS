@@ -4,6 +4,7 @@ import { embedSpin, embedState } from "../api/embed";
 import { Paytable, Theme } from "../api/play";
 import SlotGameCanvas from "../components/SlotGameCanvas";
 import { PaytableModal } from "../components/PaytableModal";
+import { ApiError } from "../api/client";
 import type { SpinResponse } from "../api/spinApi";
 
 /**
@@ -30,6 +31,7 @@ export default function EmbedPage() {
   const [paytable, setPaytable] = useState<Paytable | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [lowBalance, setLowBalance] = useState(false);
 
   useEffect(() => {
     if (!sessionToken) {
@@ -65,6 +67,16 @@ export default function EmbedPage() {
     return r;
   };
 
+  // Saldo insuficiente (HTTP 402): muestra un modal amable en vez del error rojo del
+  // canvas. Devuelve true para que la escena NO pinte su mensaje genérico.
+  const handleSpinError = (err: unknown): boolean => {
+    if (err instanceof ApiError && (err.status === 402 || err.code === "insufficient_funds")) {
+      setLowBalance(true);
+      return true;
+    }
+    return false;
+  };
+
   return (
     <div className="play-shell">
       {/* En iframe solo dejamos el acceso a las combinaciones ganadoras. */}
@@ -88,6 +100,7 @@ export default function EmbedPage() {
             spin={spin}
             betAmount={bet}
             onBalance={setBalance}
+            onSpinError={handleSpinError}
             theme={theme ?? undefined}
             grid={grid ?? undefined}
             balance={balance}
@@ -102,6 +115,23 @@ export default function EmbedPage() {
       </main>
       {showHelp && paytable && (
         <PaytableModal paytable={paytable} onClose={() => setShowHelp(false)} />
+      )}
+      {lowBalance && (
+        <div className="lowbal-overlay" onClick={() => setLowBalance(false)}>
+          <div className="lowbal-card" onClick={(e) => e.stopPropagation()}>
+            <div className="lowbal-icon">💰</div>
+            <h3>Saldo insuficiente</h3>
+            <p>No tienes saldo para esta apuesta. Recarga tu cuenta para seguir jugando.</p>
+            <p className="lowbal-balance">
+              Saldo actual: <b>{curSymbol}{(balance / 10 ** curExponent).toLocaleString(undefined, {
+                minimumFractionDigits: curExponent, maximumFractionDigits: curExponent,
+              })} {currency}</b>
+            </p>
+            <button className="btn primary lowbal-btn" onClick={() => setLowBalance(false)}>
+              Entendido
+            </button>
+          </div>
+        </div>
       )}
     </div>
   );
