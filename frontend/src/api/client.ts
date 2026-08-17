@@ -17,6 +17,30 @@ interface Options {
   token?: string | null;
 }
 
+/**
+ * Saca un mensaje legible de CUALQUIER forma de error de DRF:
+ *  - {"detail": "..."}                    (errores APIException)
+ *  - ["...", "..."]                        (ValidationError a nivel de serializer)
+ *  - {"non_field_errors": ["..."], ...}    (validate())
+ *  - {"campo": ["error1", "error2"], ...}  (errores por campo)
+ */
+function extractError(data: unknown, status: number): string {
+  if (typeof data === "string" && data) return data;
+  if (Array.isArray(data)) return data.map(String).join(" ");
+  if (data && typeof data === "object") {
+    const obj = data as Record<string, unknown>;
+    if (typeof obj.detail === "string") return obj.detail;
+    const parts: string[] = [];
+    for (const [key, val] of Object.entries(obj)) {
+      if (key === "code") continue;
+      const msg = Array.isArray(val) ? val.map(String).join(" ") : String(val);
+      parts.push(key === "non_field_errors" ? msg : `${key}: ${msg}`);
+    }
+    if (parts.length) return parts.join(" · ");
+  }
+  return `HTTP ${status}`;
+}
+
 export async function apiFetch<T>(path: string, opts: Options = {}): Promise<T> {
   const headers: Record<string, string> = {};
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
@@ -37,8 +61,8 @@ export async function apiFetch<T>(path: string, opts: Options = {}): Promise<T> 
     data = null;
   }
   if (!res.ok) {
-    const err = data as { detail?: string; code?: string } | null;
-    throw new ApiError(err?.detail ?? `HTTP ${res.status}`, res.status, err?.code);
+    const code = (data as { code?: string } | null)?.code;
+    throw new ApiError(extractError(data, res.status), res.status, code);
   }
   return data as T;
 }
@@ -56,8 +80,8 @@ export async function apiUpload<T>(path: string, formData: FormData, token?: str
     data = null;
   }
   if (!res.ok) {
-    const err = data as { detail?: string; code?: string } | null;
-    throw new ApiError(err?.detail ?? `HTTP ${res.status}`, res.status, err?.code);
+    const code = (data as { code?: string } | null)?.code;
+    throw new ApiError(extractError(data, res.status), res.status, code);
   }
   return data as T;
 }
