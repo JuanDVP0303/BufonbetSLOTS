@@ -58,6 +58,7 @@ from .services import (
     launch_internal_session,
     grant_free_rounds,
     launch_operator_session,
+    resize_game,
     set_game_target_rtp,
     simulate_game_rtp,
 )
@@ -780,13 +781,23 @@ class GameThemeView(APIView):
         ser = GameThemeSerializer(data=request.data, partial=True)
         ser.is_valid(raise_exception=True)
         data = dict(ser.validated_data)
-        # target_rtp NO es campo del juego: cambia la config de RTP y RE-CALIBRA la
-        # paytable (puede tardar unos segundos por la simulación de cuadre).
+        # target_rtp y el tamaño de rejilla NO son campos simples del juego: disparan
+        # recalibración (y, en el resize, regeneran bandas/líneas). Pueden tardar unos
+        # segundos por la simulación de cuadre.
         new_rtp = data.pop("target_rtp", None)
+        new_cols = data.pop("grid_cols", None)
+        new_rows = data.pop("grid_rows", None)
         for field, value in data.items():
             setattr(game, field, value)
         if data:
             game.save(update_fields=list(data.keys()))
+        # Resize primero (regenera matemática); luego RTP si además lo cambiaron.
+        cols = new_cols if new_cols is not None else game.grid_cols
+        rows = new_rows if new_rows is not None else game.grid_rows
+        if (new_cols is not None and new_cols != game.grid_cols) or (
+            new_rows is not None and new_rows != game.grid_rows
+        ):
+            resize_game(game, grid_cols=cols, grid_rows=rows)
         if new_rtp is not None:
             set_game_target_rtp(game, new_rtp)
         return Response(_game_row(game))

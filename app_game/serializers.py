@@ -164,6 +164,9 @@ class GameThemeSerializer(serializers.Serializer):
         max_digits=6, decimal_places=4, min_value=Decimal("0.10"), max_value=Decimal("1.50"),
         required=False,
     )
+    # Tamaño de rejilla (opcional): si viene, regenera bandas/líneas y recalibra.
+    grid_cols = serializers.IntegerField(min_value=3, max_value=7, required=False)
+    grid_rows = serializers.IntegerField(min_value=3, max_value=6, required=False)
 
 
 class FreeRoundGrantSerializer(serializers.Serializer):

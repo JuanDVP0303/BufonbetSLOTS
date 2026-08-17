@@ -96,6 +96,9 @@ function ThemeEditor({ token, game, onSaved }: { token: string; game: GameRow; o
   // RTP en porcentaje; editarlo RE-CALIBRA la paytable en el backend.
   const initialRtpPct = game.target_rtp ? (parseFloat(game.target_rtp) * 100).toString() : "";
   const [rtpPct, setRtpPct] = useState(initialRtpPct);
+  // Tamaño de rejilla: cambiarlo regenera la matemática (bandas, líneas, pagos, RTP).
+  const [cols, setCols] = useState(String(game.grid.cols));
+  const [rows, setRows] = useState(String(game.grid.rows));
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [ok, setOk] = useState(false);
@@ -106,12 +109,25 @@ function ThemeEditor({ token, game, onSaved }: { token: string; game: GameRow; o
     if (rtpChanged && (!Number.isFinite(rtpNum) || rtpNum < 0.1 || rtpNum > 1.5)) {
       setErr("El RTP debe estar entre 10% y 150%."); return;
     }
+    const colsN = parseInt(cols, 10);
+    const rowsN = parseInt(rows, 10);
+    const gridChanged = colsN !== game.grid.cols || rowsN !== game.grid.rows;
+    if (gridChanged) {
+      if (!Number.isFinite(colsN) || colsN < 3 || colsN > 7 || !Number.isFinite(rowsN) || rowsN < 3 || rowsN > 6) {
+        setErr("Rodillos 3–7 y filas 3–6."); return;
+      }
+      if (!window.confirm(
+        "Cambiar el tamaño de la rejilla REGENERA las bandas, restablece las líneas por " +
+        "defecto, ajusta los pagos y recalibra el RTP (tarda unos segundos). ¿Continuar?"
+      )) return;
+    }
     setSaving(true); setErr(null); setOk(false);
     try {
       await updateGameTheme(token, game.slug, {
         title, background_color: bg, accent_color: accent,
         background_type: bgType, background_gradient: gradient,
         ...(rtpChanged ? { target_rtp: rtpNum.toFixed(4) } : {}),
+        ...(gridChanged ? { grid_cols: colsN, grid_rows: rowsN } : {}),
       });
       setOk(true);
       window.setTimeout(() => setOk(false), 2500);
@@ -145,6 +161,22 @@ function ThemeEditor({ token, game, onSaved }: { token: string; game: GameRow; o
             type="number" inputMode="decimal" step="0.5" min="10" max="150"
             value={rtpPct} onChange={(e) => setRtpPct(e.target.value)}
             title="Cambiarlo re-calibra la paytable (puede tardar unos segundos)."
+          />
+        </label>
+        <label className="field sm">
+          <span>Rodillos</span>
+          <input
+            type="number" inputMode="numeric" min="3" max="7"
+            value={cols} onChange={(e) => setCols(e.target.value)}
+            title="Cambiarlo regenera bandas/líneas y recalibra el RTP."
+          />
+        </label>
+        <label className="field sm">
+          <span>Filas</span>
+          <input
+            type="number" inputMode="numeric" min="3" max="6"
+            value={rows} onChange={(e) => setRows(e.target.value)}
+            title="Cambiarlo regenera bandas/líneas y recalibra el RTP."
           />
         </label>
         <label className="field sm">

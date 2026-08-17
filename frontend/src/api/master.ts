@@ -216,6 +216,9 @@ export interface GameThemePatch {
   background_gradient?: string;
   /** RTP objetivo (fracción, ej. "0.95"). Si viene, el backend re-calibra la paytable. */
   target_rtp?: string;
+  /** Tamaño de rejilla. Si cambia, regenera bandas/líneas y recalibra. */
+  grid_cols?: number;
+  grid_rows?: number;
 }
 
 export const updateGameTheme = (token: string, slug: string, body: GameThemePatch) =>

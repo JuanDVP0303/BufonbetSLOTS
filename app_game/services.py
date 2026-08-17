@@ -671,38 +671,37 @@ def create_configurable_game(*, spec, math_version="v1"):
     return game
 
 
-def _calibration_rtp(game, math_version, bet, spins) -> float:
-    """
-    RTP de referencia para CUADRAR, lo más estable posible:
-      - LINES: valor ANALÍTICO exacto (cerrado, sin varianza de muestreo).
-      - WAYS: promedio de varias corridas Monte Carlo con semillas distintas (reduce
-        el sobreajuste a la suerte de una sola muestra en juegos volátiles).
-    """
-    engine = build_engine(game, math_version)
-    analytic = engine.analytic_line_rtp()
-    if analytic is not None:
-        return analytic
+def _scale_payouts(payouts, factor):
+    """Escala todos los multiplicadores por `factor` (Decimal), a 2 decimales."""
+    for p in payouts:
+        scaled = (p.multiplier * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        p.multiplier = max(Decimal("0.01"), scaled)
+    SymbolPayout.objects.bulk_update(payouts, ["multiplier"])
+
+
+def _simulated_rtp(game, math_version, bet, spins, seeds=3) -> float:
+    """RTP MEDIDO por simulación (incluye truncado y feature), promedio de varias
+    semillas para reducir el ruido en juegos volátiles."""
     vals = [
-        simulate_rtp(build_engine(game, math_version, rng=random.Random(f"{game.slug}:calib:{s}")), bet, spins)["rtp"]
-        for s in range(3)
+        simulate_rtp(build_engine(game, math_version, rng=random.Random(f"{game.slug}:cal:{s}")), bet, spins)["rtp"]
+        for s in range(seeds)
     ]
     return sum(vals) / len(vals)
 
 
-def calibrate_game_rtp(game, *, math_version, target_rtp, spins=60_000, iterations=6, tol=0.0015):
+def calibrate_game_rtp(game, *, math_version, target_rtp, tol=0.0025):
     """
-    Ajusta la PAYTABLE para que el RTP coincida con el objetivo.
+    Ajusta la PAYTABLE para que el RTP MEDIDO coincida con el objetivo.
 
-    Cómo: mide el RTP de referencia (analítico en LINES; promedio Monte Carlo en WAYS) y
-    ESCALA todos los multiplicadores por (objetivo / medido). Es la técnica estándar y
-    CERTIFICABLE de cuadre de RTP: el RNG y las bandas no se tocan (los tiros siguen
-    siendo independientes); solo se calibra cuánto paga cada combinación. Se itera porque
-    la precisión de 2 decimales del multiplicador introduce una pequeña no linealidad.
-    Devuelve el RTP de referencia final.
+    Dos fases:
+      1) ANALÍTICA (solo LINES): valor cerrado y sin ruido → cuadra rápido la "forma".
+      2) SIMULACIÓN: mide el RTP real (incluye el truncado a céntimos y el feature, que
+         el analítico ignora) y hace la corrección final. En WAYS solo se usa esta fase.
 
-    Nota: escalar la paytable calibra también las tiradas gratis (usan los mismos
-    multiplicadores × su multiplicador de ronda), así que un único factor cuadra el
-    RTP TOTAL, feature incluido.
+    Escalar la paytable calibra también las tiradas gratis (mismos multiplicadores ×
+    su multiplicador de ronda), así que un único factor cuadra el RTP TOTAL. El RNG y
+    las bandas NO se tocan: los tiros siguen siendo independientes (certificable).
+    Devuelve el RTP simulado final.
     """
     target = float(target_rtp)
     payouts = list(SymbolPayout.objects.filter(game=game))
@@ -712,17 +711,86 @@ def calibrate_game_rtp(game, *, math_version, target_rtp, spins=60_000, iteratio
     profile = game.bet_profiles.filter(is_active=True).first()
     bet = profile.default_bet if profile else 100
 
-    measured = _calibration_rtp(game, math_version, bet, spins)
-    for _ in range(iterations):
+    # Fase 1: cuadre analítico exacto (LINES). Deja la paytable muy cerca sin varianza.
+    for _ in range(6):
+        analytic = build_engine(game, math_version).analytic_line_rtp()
+        if analytic is None:  # WAYS: no aplica la fórmula cerrada
+            break
+        if analytic <= 0 or abs(analytic - target) <= 0.0008:
+            break
+        _scale_payouts(payouts, Decimal(str(target / analytic)))
+
+    # Fase 2: corrección por simulación (truncado + feature). Pocas iteraciones bastan.
+    measured = _simulated_rtp(game, math_version, bet, 60_000)
+    for _ in range(4):
         if measured <= 0 or abs(measured - target) <= tol:
             break
-        factor = Decimal(str(target / measured))
-        for p in payouts:
-            scaled = (p.multiplier * factor).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-            p.multiplier = max(Decimal("0.01"), scaled)
-        SymbolPayout.objects.bulk_update(payouts, ["multiplier"])
-        measured = _calibration_rtp(game, math_version, bet, spins)
+        _scale_payouts(payouts, Decimal(str(target / measured)))
+        measured = _simulated_rtp(game, math_version, bet, 60_000)
     return measured
+
+
+def resize_game(game, *, grid_cols, grid_rows):
+    """
+    Cambia el tamaño de la rejilla (rodillos × filas) de un casino YA creado.
+
+    Es una edición de MATEMÁTICA, no solo visual, así que:
+      1. Regenera las BANDAS desde los pesos de los símbolos (una por rodillo nuevo).
+      2. Arregla los PAGOS cuyo `count` supere los rodillos nuevos (los recorta a
+         `grid_cols`; si quedan duplicados por símbolo, conserva el de mayor multiplicador).
+      3. En modo LÍNEAS, regenera las líneas por defecto (las dibujadas a mano dejan de
+         ser válidas al cambiar el tamaño).
+      4. RE-CALIBRA el RTP al objetivo vigente (la matemática cambió).
+
+    Devuelve el juego.
+    """
+    grid_cols = int(grid_cols)
+    grid_rows = int(grid_rows)
+    if not (3 <= grid_cols <= 7 and 3 <= grid_rows <= 6):
+        raise ValidationError("Rodillos permitidos 3–7 y filas 3–6.")
+
+    rtp_config = get_active_rtp_config(game=game, operator=None)
+    math_version = rtp_config.math_version
+
+    game.grid_cols = grid_cols
+    game.grid_rows = grid_rows
+    game.save(update_fields=["grid_cols", "grid_rows"])
+
+    # 1) Bandas nuevas desde los pesos (mismo criterio que al crear el casino).
+    base_strip = []
+    for s in game.symbols.all():
+        base_strip.extend([s.code] * max(1, s.weight))
+    rng = random.Random(f"{game.slug}:{math_version}:resize:{grid_cols}x{grid_rows}")
+    ReelStrip.objects.filter(game=game, math_version=math_version).delete()
+    for reel in range(grid_cols):
+        strip = base_strip[:]
+        rng.shuffle(strip)
+        ReelStrip.objects.create(game=game, math_version=math_version, reel_index=reel, strip=strip)
+
+    # 2) Pagos con count > rodillos nuevos: se recortan; se deduplica por (símbolo, count)
+    #    conservando el de MAYOR multiplicador para que ningún símbolo se quede sin pago.
+    payouts = list(SymbolPayout.objects.filter(game=game))
+    for p in payouts:
+        p.count = min(p.count, grid_cols)
+    payouts.sort(key=lambda x: (x.symbol_id, x.count, -float(x.multiplier)))
+    seen = set()
+    for p in payouts:
+        key = (p.symbol_id, p.count)
+        if key in seen:
+            p.delete()
+        else:
+            seen.add(key)
+            p.save(update_fields=["count"])
+
+    # 3) Líneas por defecto (solo LÍNEAS). En WAYS no hay líneas.
+    if game.win_mode == WinMode.LINES:
+        Payline.objects.filter(game=game).delete()
+        for i, pat in enumerate(default_paylines(grid_cols, grid_rows)):
+            Payline.objects.create(game=game, index=i, pattern=list(pat))
+
+    # 4) Re-cuadre del RTP (la matemática cambió).
+    calibrate_game_rtp(game, math_version=math_version, target_rtp=rtp_config.target_rtp)
+    return game
 
 
 def set_game_target_rtp(game, target_rtp):
