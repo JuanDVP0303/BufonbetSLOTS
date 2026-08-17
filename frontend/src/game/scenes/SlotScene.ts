@@ -57,7 +57,6 @@ export class SlotScene extends Phaser.Scene {
   private bannerY = 700;
   private buttonY = 850;
   private barTop = 800;
-  private infoY = 820;
 
   private winGfx!: Phaser.GameObjects.Graphics;
   private winText!: Phaser.GameObjects.Text;
@@ -238,7 +237,6 @@ export class SlotScene extends Phaser.Scene {
     }
 
     const footerH = this.H - this.barTop;
-    this.infoY = this.barTop + footerH * 0.5;
     this.buttonY = this.barTop + footerH * 0.5;
     // Franja superior donde va la GANANCIA en PC (el hueco que deja el logo al centro).
     this.topInfoY = Math.max(28, this.gridY - this.panelPad * 1.1);
