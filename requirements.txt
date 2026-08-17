@@ -1,0 +1,33 @@
+# Núcleo
+Django>=5.0,<5.2
+djangorestframework>=3.15
+django-environ>=0.11
+psycopg[binary]>=3.2
+
+# Autenticación de tokens del iframe / operadores
+PyJWT[crypto]>=2.8
+
+# JWT para cuentas internas (jugador/master)
+djangorestframework-simplejwt>=5.3
+
+# Tareas en segundo plano (conciliación, reintentos de webhooks, exportación de auditoría)
+celery>=5.4
+redis>=5.0
+
+# Imágenes (assets de símbolos, ImageField)
+Pillow>=10.0
+
+# Servidor de producción
+gunicorn>=22.0
+
+# Tasas de cambio en vivo (servicio load_fx_rates vía websocket de investing.com)
+websocket-client>=1.7
+rel>=0.4
+
+# CORS: el operador (otro origen) llama a la API del proveedor desde el navegador
+django-cors-headers>=4.4
+
+# --- Desarrollo/QA (mover a requirements-dev.txt cuando crezca) ---
+pytest>=8.0
+pytest-django>=4.8
+factory-boy>=3.3

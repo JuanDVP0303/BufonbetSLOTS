@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Django
+*.log
+db.sqlite3
+/staticfiles/
+staticfiles/
+/media/
+media/
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+dist/
+*.tsbuildinfo
+
+# SO
+.DS_Store
+*.egg-info/
+
+# Entorno / secretos
+.env
+.env.*
+!.env.example
+
+# Herramientas
+.pytest_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+
+# Sesiones de Claude Code (incluye contexto de otros proyectos, no versionar)
+claude-context/
