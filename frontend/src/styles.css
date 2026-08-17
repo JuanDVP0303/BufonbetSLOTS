@@ -1005,6 +1005,21 @@ code {
 .lowbal-card p { margin: 6px 0; color: rgba(255, 255, 255, 0.75); }
 .lowbal-balance { font-size: 0.95rem; }
 .lowbal-btn { margin-top: 18px; width: 100%; }
+
+/* Spinner reutilizable (botones ocupados, cargas). */
+.spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  vertical-align: -2px;
+  margin-right: 4px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.6s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.creating-hint { margin-top: 4px; }
 .fs-retrigger { white-space: nowrap; }
 
 /* ================= Toast / notificaciones ================= */

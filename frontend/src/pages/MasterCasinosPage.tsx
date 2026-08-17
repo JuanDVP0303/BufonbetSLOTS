@@ -163,7 +163,7 @@ function ThemeEditor({ token, game, onSaved }: { token: string; game: GameRow; o
           </label>
         )}
         <button type="button" className="btn primary btn-small" onClick={save} disabled={saving}>
-          {saving ? "Guardando…" : "Guardar tema"}
+          {saving ? <><span className="spinner" /> Guardando…</> : "Guardar tema"}
         </button>
       </div>
     </>
@@ -659,7 +659,14 @@ export default function MasterCasinosPage() {
               <button type="button" className="btn ghost btn-small" onClick={() => setBets((xs) => [...xs, { currency: currencies[0]?.code ?? "USD", min_bet: "20", max_bet: "50000", default_bet: "100", bet_levels: "20,50,100" }])}>+ moneda</button>
             </div>
 
-            <button className="btn primary" disabled={busy || !name}>Crear casino</button>
+            <button className="btn primary" disabled={busy || !name}>
+              {busy ? <><span className="spinner" /> Creando y calibrando RTP…</> : "Crear casino"}
+            </button>
+            {busy && (
+              <p className="muted creating-hint">
+                Generando bandas y cuadrando el RTP al objetivo. Puede tardar unos segundos, no cierres la página.
+              </p>
+            )}
             <p className="muted">Tras crear, súbele los assets y corre la simulación de RTP para verificar el %.</p>
           </form>
         </section>

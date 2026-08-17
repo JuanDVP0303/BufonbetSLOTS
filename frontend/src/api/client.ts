@@ -25,6 +25,11 @@ interface Options {
  *  - {"campo": ["error1", "error2"], ...}  (errores por campo)
  */
 function extractError(data: unknown, status: number): string {
+  // 413 lo devuelve nginx (no Django) como HTML, sin JSON legible: mensaje claro.
+  if (status === 413) {
+    return "El archivo es demasiado grande para el servidor. Súbelo más liviano " +
+      "o pide subir el límite del servidor (nginx: client_max_body_size).";
+  }
   if (typeof data === "string" && data) return data;
   if (Array.isArray(data)) return data.map(String).join(" ");
   if (data && typeof data === "object") {
