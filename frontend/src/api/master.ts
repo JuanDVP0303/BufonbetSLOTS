@@ -14,11 +14,24 @@ export interface PlayerRow {
 export interface AuditRow {
   sequence_number: number;
   external_player_id: string;
+  operator: string | null;
+  game: string | null;
   bet_amount: number;
   win_amount: number;
+  net_amount: number;
+  result: "win" | "loss" | "neutral";
   currency: string;
   math_version: string;
   recorded_at: string;
+}
+
+export interface AuditFilters {
+  from?: string;
+  to?: string;
+  player?: string;
+  operator?: string;
+  result?: "" | "win" | "loss" | "neutral";
+  currency?: string;
 }
 
 export interface GameRow {
@@ -127,10 +140,16 @@ export const listPlayers = (token: string, page = 1, pageSize = 25) =>
   apiFetch<Paginated<PlayerRow>>(`/master/players/${qs(page, pageSize)}`, { token });
 
 export const listAudit = (
-  token: string, page = 1, pageSize = 25, from?: string, to?: string
+  token: string, page = 1, pageSize = 25, filters: AuditFilters = {}
 ) => {
-  const extra = `${from ? `&from=${from}` : ""}${to ? `&to=${to}` : ""}`;
-  return apiFetch<Paginated<AuditRow>>(`/master/audit/${qs(page, pageSize)}${extra}`, { token });
+  const p = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+  if (filters.from) p.set("from", filters.from);
+  if (filters.to) p.set("to", filters.to);
+  if (filters.player) p.set("player", filters.player.trim());
+  if (filters.operator) p.set("operator", filters.operator);
+  if (filters.result) p.set("result", filters.result);
+  if (filters.currency) p.set("currency", filters.currency);
+  return apiFetch<Paginated<AuditRow>>(`/master/audit/?${p.toString()}`, { token });
 };
 
 export interface FreeRoundGrantRow {

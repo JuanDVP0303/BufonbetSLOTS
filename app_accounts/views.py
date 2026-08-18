@@ -1,5 +1,6 @@
 from django.contrib.auth import authenticate, get_user_model
 from django.db import transaction
+from django.db.models import F
 from django.shortcuts import get_object_or_404
 from django.utils.dateparse import parse_date
 from rest_framework import status
@@ -9,6 +10,8 @@ from rest_framework.views import APIView
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from app_audit.models import SpinAuditLog
+from app_game.models import Game
+from app_wallet_integration.models import Operator
 from common.pagination import paginate
 
 from .models import BalanceEntryKind, PlayerWallet, Profile, Role
@@ -167,20 +170,79 @@ class CreditPlayerView(APIView):
 
 class AuditListView(APIView):
     """
-    (Master) Log de auditoría inmutable, paginado (?page, ?page_size) y con filtro por
-    rango de fechas inclusivo (?from=YYYY-MM-DD&to=YYYY-MM-DD, ambos opcionales).
+    (Master) Log de auditoría inmutable, paginado (?page, ?page_size) con filtros:
+      - ?from=YYYY-MM-DD & ?to=YYYY-MM-DD  → rango de fechas inclusivo.
+      - ?player=<texto>                    → coincidencia parcial en el id de jugador.
+      - ?operator=<code|internal>          → operador por código; "internal" = giros propios.
+      - ?result=win|loss|neutral           → ganadas / perdidas / neutras (premio vs apuesta).
+      - ?currency=USD                      → moneda exacta.
+    Todos son opcionales y combinables.
     """
 
     permission_classes = [IsMaster]
 
     def get(self, request):
+        params = request.query_params
         qs = SpinAuditLog.objects.order_by("-sequence_number")
-        date_from = parse_date(request.query_params.get("from", "") or "")
-        date_to = parse_date(request.query_params.get("to", "") or "")
+
+        date_from = parse_date(params.get("from", "") or "")
+        date_to = parse_date(params.get("to", "") or "")
         if date_from:
             qs = qs.filter(recorded_at__date__gte=date_from)
         if date_to:
             qs = qs.filter(recorded_at__date__lte=date_to)
-        return Response(
-            paginate(request, qs, lambda rows: AuditRowSerializer(rows, many=True).data)
-        )
+
+        player = (params.get("player", "") or "").strip()
+        if player:
+            qs = qs.filter(external_player_id__icontains=player)
+
+        operator = (params.get("operator", "") or "").strip()
+        if operator:
+            if operator.lower() in ("internal", "interno", "propio"):
+                qs = qs.filter(operator_id__isnull=True)
+            else:
+                op = Operator.objects.filter(code__iexact=operator).first()
+                # Un código inexistente no debe devolver TODO: filtra a un UUID imposible.
+                qs = qs.filter(operator_id=op.id) if op else qs.none()
+
+        result = (params.get("result", "") or "").strip().lower()
+        if result == "win":
+            qs = qs.filter(win_amount__gt=F("bet_amount"))
+        elif result == "loss":
+            qs = qs.filter(win_amount__lt=F("bet_amount"))
+        elif result == "neutral":
+            qs = qs.filter(win_amount=F("bet_amount"))
+
+        currency = (params.get("currency", "") or "").strip().upper()
+        if currency:
+            qs = qs.filter(currency=currency)
+
+        def serialize(rows):
+            op_ids = {r.operator_id for r in rows if r.operator_id}
+            game_ids = {r.game_id for r in rows}
+            op_names = dict(Operator.objects.filter(id__in=op_ids).values_list("id", "name"))
+            games = {
+                gid: (title or name)
+                for gid, title, name in Game.objects.filter(id__in=game_ids).values_list(
+                    "id", "title", "name"
+                )
+            }
+            data = []
+            for r in rows:
+                net = r.win_amount - r.bet_amount
+                data.append({
+                    "sequence_number": r.sequence_number,
+                    "external_player_id": r.external_player_id,
+                    "operator": op_names.get(r.operator_id) if r.operator_id else "Interno",
+                    "game": games.get(r.game_id),
+                    "bet_amount": r.bet_amount,
+                    "win_amount": r.win_amount,
+                    "net_amount": net,
+                    "result": "win" if net > 0 else "loss" if net < 0 else "neutral",
+                    "currency": r.currency,
+                    "math_version": r.math_version,
+                    "recorded_at": r.recorded_at,
+                })
+            return AuditRowSerializer(data, many=True).data
+
+        return Response(paginate(request, qs, serialize))

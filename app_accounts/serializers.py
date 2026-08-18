@@ -42,8 +42,12 @@ class PlayerRowSerializer(serializers.Serializer):
 class AuditRowSerializer(serializers.Serializer):
     sequence_number = serializers.IntegerField()
     external_player_id = serializers.CharField()
+    operator = serializers.CharField(allow_null=True)
+    game = serializers.CharField(allow_null=True)
     bet_amount = serializers.IntegerField()
     win_amount = serializers.IntegerField()
+    net_amount = serializers.IntegerField()
+    result = serializers.CharField()
     currency = serializers.CharField()
     math_version = serializers.CharField()
     recorded_at = serializers.DateTimeField()
