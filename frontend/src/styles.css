@@ -6,13 +6,13 @@
 :root {
   color-scheme: light;
 
-  --bg: #eef1f6;          /* fondo de página, gris frío suave */
-  --bg-tint: #e6eaf2;     /* profundidad sutil de los shells */
+  --bg: #d7dce6;          /* fondo de página, gris frío (más marcado, no lavado) */
+  --bg-tint: #cbd1de;     /* profundidad sutil de los shells */
   --surface: #ffffff;     /* tarjetas, barras, modales */
-  --surface-2: #f4f6fb;   /* inputs, code, celdas embebidas */
-  --surface-3: #eaeef6;   /* hover, botones secundarios/ghost */
-  --border: #e4e8f1;      /* líneas finas */
-  --border-2: #d3dae7;    /* bordes de inputs y separadores fuertes */
+  --surface-2: #eef1f7;   /* inputs, code, celdas embebidas */
+  --surface-3: #e1e6f0;   /* hover, botones secundarios/ghost */
+  --border: #cfd6e2;      /* líneas finas */
+  --border-2: #bfc7d8;    /* bordes de inputs y separadores fuertes */
 
   --text: #1b2331;        /* texto principal */
   --text-2: #3e4863;      /* títulos / secundario */
