@@ -2,7 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import { useAuth } from "../auth/AuthContext";
 import { CurrencyInfo, listCurrencies } from "../api/master";
 import { OperatorPlayer, OperatorSpin, Paginated } from "../api/operators";
-import { OperatorMe, getMyOperator, getMyOperatorPlayers, getMyOperatorSpins } from "../api/operatorPortal";
+import {
+  MyWebhookSecret,
+  OperatorMe,
+  getMyOperator,
+  getMyOperatorPlayers,
+  getMyOperatorSpins,
+  getMyWebhookSecret,
+} from "../api/operatorPortal";
 import { Pager } from "../components/Pager";
 
 /** Back office del OPERADOR: ve SOLO los datos de su propio operador. */
@@ -15,6 +22,8 @@ export default function OperatorPortalPage() {
   const [players, setPlayers] = useState<Paginated<OperatorPlayer> | null>(null);
   const [playersPage, setPlayersPage] = useState(1);
   const [tab, setTab] = useState<"overview" | "players" | "spins">("overview");
+  const [secret, setSecret] = useState<MyWebhookSecret | null>(null);
+  const [revealSecret, setRevealSecret] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const curMap = new Map(currencies.map((c) => [c.code, c]));
@@ -33,10 +42,19 @@ export default function OperatorPortalPage() {
     try {
       setMe(await getMyOperator(token!));
       setCurrencies(await listCurrencies(token!));
+      setSecret(await getMyWebhookSecret(token!));
     } catch (e) {
       setError(e instanceof Error ? e.message : "Error al cargar");
     }
   }, [token]);
+
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard puede fallar en http; el operador copia a mano */
+    }
+  }
   useEffect(() => { load(); }, [load]);
 
   const loadSpins = useCallback(async (p: number) => {
@@ -119,6 +137,35 @@ export default function OperatorPortalPage() {
               </div>
             ) : (
               <p className="muted">Aún no hay jugadas.</p>
+            )}
+          </section>
+        )}
+
+        {tab === "overview" && secret?.configured && (
+          <section className="card">
+            <div className="card-head">
+              <h2>Integración · Firma de webhooks</h2>
+              <span className="muted">HMAC-SHA256</span>
+            </div>
+            <p className="muted">
+              Verifica con este secreto la cabecera <code>X-SlotForge-Signature</code> de las
+              llamadas a tu billetera (débito/crédito/rollback). Es de solo lectura: si necesitas
+              rotarlo, pídelo al proveedor.
+            </p>
+            <div className="secret-reveal">
+              <span className="secret-k">Secreto HMAC</span>
+              <div className="secret-val">
+                <code>{revealSecret ? secret.secret : "•".repeat(Math.min(secret.secret.length, 40))}</code>
+                <button className="btn ghost btn-small" onClick={() => setRevealSecret((v) => !v)}>
+                  {revealSecret ? "Ocultar" : "Revelar"}
+                </button>
+                <button className="btn ghost btn-small" onClick={() => copy(secret.secret)}>Copiar</button>
+              </div>
+            </div>
+            {secret.wallet_base_url && (
+              <p className="secret-hint muted">
+                Billetera configurada: <code>{secret.wallet_base_url}</code>
+              </p>
             )}
           </section>
         )}

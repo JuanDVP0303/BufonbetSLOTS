@@ -232,6 +232,18 @@ class OperatorGameAssignSerializer(serializers.Serializer):
     is_enabled = serializers.BooleanField(required=False, default=True)
 
 
+class WebhookSecretRefSerializer(serializers.Serializer):
+    """
+    Referencia al secreto HMAC del webhook: preferentemente el NOMBRE de una variable
+    de entorno (el valor real vive en el .env del servidor, no en la BD). Se admite
+    vacío para dejarlo sin configurar.
+    """
+
+    ref = serializers.CharField(
+        max_length=200, required=False, allow_blank=True, default="", trim_whitespace=True
+    )
+
+
 class SimulateSerializer(serializers.Serializer):
     spins = serializers.IntegerField(min_value=1000, max_value=1_000_000, required=False, default=100_000)
     bet_amount = serializers.IntegerField(min_value=1, required=False, allow_null=True, default=None)

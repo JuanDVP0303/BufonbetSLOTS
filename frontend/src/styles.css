@@ -853,6 +853,22 @@ code {
   background: #ffffff; padding: 8px 10px; border-radius: 8px;
 }
 
+/* Secreto HMAC del webhook (Master edita, Operador solo copia). */
+.secret-actions { display: flex; gap: 8px; margin-top: 4px; }
+.secret-hint { margin-top: 10px; font-size: 13px; }
+.secret-hint code { color: var(--text-2); word-break: break-all; }
+.secret-reveal {
+  margin-top: 12px; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px;
+}
+.secret-k { font-size: 12px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
+.secret-val { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.secret-val code {
+  flex: 1 1 260px; min-width: 0; font-size: 14px; color: var(--text); word-break: break-all;
+  user-select: all; background: var(--surface); border: 1px solid var(--border);
+  padding: 8px 10px; border-radius: 8px;
+}
+
 .op-table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .op-table th { text-align: left; color: var(--muted); font-weight: 600; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 .op-table td { padding: 6px 8px; border-bottom: 1px solid var(--border); }

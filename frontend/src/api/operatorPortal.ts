@@ -24,3 +24,14 @@ export const getMyOperatorPlayers = (token: string, page = 1, pageSize = 25) =>
     `/operator/me/players/?page=${page}&page_size=${pageSize}`,
     { token }
   );
+
+/** MI secreto HMAC del webhook, solo lectura (para copiarlo y verificar firmas). */
+export interface MyWebhookSecret {
+  configured: boolean;
+  secret: string;
+  seamless: boolean;
+  wallet_base_url: string;
+}
+
+export const getMyWebhookSecret = (token: string) =>
+  apiFetch<MyWebhookSecret>("/operator/me/webhook-secret/", { token });

@@ -12,6 +12,7 @@ import {
   OperatorUserRow,
   OperatorsReport,
   Paginated,
+  WebhookSecretStatus,
   assignOperatorGame,
   createOperator,
   createOperatorKey,
@@ -19,12 +20,14 @@ import {
   getOperatorPlayers,
   getOperatorPlays,
   getOperatorSpins,
+  getOperatorWebhookSecret,
   getOperatorsReport,
   listOperatorGames,
   listOperatorKeys,
   listOperatorUsers,
   listOperators,
   setOperatorUserPassword,
+  setOperatorWebhookSecret,
 } from "../api/operators";
 import { MasterNav } from "../components/MasterNav";
 import { Modal } from "../components/Modal";
@@ -55,6 +58,11 @@ export default function MasterOperatorsPage() {
   const [playersList, setPlayersList] = useState<Paginated<OperatorPlayer> | null>(null);
   const [playersPage, setPlayersPage] = useState(1);
   const [freshKey, setFreshKey] = useState<NewApiKey | null>(null);
+  // Secreto HMAC del webhook (X-SlotForge-Signature).
+  const [secret, setSecret] = useState<WebhookSecretStatus | null>(null);
+  const [secretRef, setSecretRef] = useState("");
+  const [revealSecret, setRevealSecret] = useState(false);
+  const [savingSecret, setSavingSecret] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState("");
   // Modales de cuentas: crear cuenta / cambiar contraseña.
@@ -86,11 +94,15 @@ export default function MasterOperatorsPage() {
 
   const loadDetail = useCallback(async (code: string) => {
     setFreshKey(null);
+    setRevealSecret(false);
     try {
       setKeys(await listOperatorKeys(token!, code));
       setUsers(await listOperatorUsers(token!, code));
       setGames(await listOperatorGames(token!, code));
       setPlays(await getOperatorPlays(token!, code));
+      const st = await getOperatorWebhookSecret(token!, code);
+      setSecret(st);
+      setSecretRef(st.ref);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Error al cargar el operador");
     }
@@ -143,6 +155,28 @@ export default function MasterOperatorsPage() {
       await loadOperators();
     } catch (err) {
       alert(err instanceof Error ? err.message : "Error al generar la clave");
+    }
+  }
+
+  async function saveSecret() {
+    if (!selected) return;
+    setSavingSecret(true);
+    try {
+      const st = await setOperatorWebhookSecret(token!, selected, secretRef.trim());
+      setSecret(st);
+      setSecretRef(st.ref);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Error al guardar el secreto");
+    } finally {
+      setSavingSecret(false);
+    }
+  }
+
+  async function copy(text: string) {
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      /* clipboard puede fallar en http; el usuario copia a mano */
     }
   }
 
@@ -439,6 +473,7 @@ export default function MasterOperatorsPage() {
 
                 {/* API KEYS */}
                 {tab === "keys" && (
+                  <>
                   <section className="card">
                     <div className="card-head">
                       <h2>API keys</h2>
@@ -470,6 +505,66 @@ export default function MasterOperatorsPage() {
                       </div>
                     )}
                   </section>
+
+                  {/* SECRETO HMAC DEL WEBHOOK (X-SlotForge-Signature) */}
+                  <section className="card">
+                    <div className="card-head">
+                      <h2>Secreto del webhook (HMAC)</h2>
+                      {secret && (secret.seamless
+                        ? <span className="badge ok">Seamless</span>
+                        : <span className="badge">Demo · no se usa</span>)}
+                    </div>
+                    <p className="muted">
+                      Con este secreto se firma la cabecera <code>X-SlotForge-Signature</code> de
+                      las llamadas a la billetera del operador (débito/crédito/rollback). El operador
+                      lo ve en su portal para verificar las firmas — el mismo valor en ambos lados.
+                    </p>
+                    <label className="field">
+                      <span>Referencia del secreto (nombre de variable de entorno, recomendado)</span>
+                      <input
+                        type="text"
+                        placeholder="p. ej. SLOTFORGE_WEBHOOK_SECRET"
+                        value={secretRef}
+                        onChange={(e) => setSecretRef(e.target.value)}
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                      />
+                    </label>
+                    <div className="secret-actions">
+                      <button
+                        className="btn primary btn-small"
+                        onClick={saveSecret}
+                        disabled={savingSecret || secretRef.trim() === (secret?.ref ?? "")}
+                      >
+                        {savingSecret ? "Guardando…" : "Guardar referencia"}
+                      </button>
+                    </div>
+                    {secret && (
+                      <>
+                        <p className="secret-hint muted">
+                          {!secret.ref
+                            ? "Sin configurar. Escribe el nombre de la env var que guarda el secreto."
+                            : secret.is_env_var
+                              ? <>Resuelto desde la variable de entorno <code>{secret.ref}</code> del servidor. ✔</>
+                              : <>⚠ <code>{secret.ref}</code> no es una variable de entorno definida en el servidor: se está usando ese texto como <b>secreto literal</b>. Si querías apuntar a una env var, defínela en el <code>.env</code> y reinicia.</>}
+                        </p>
+                        {secret.configured && (
+                          <div className="secret-reveal">
+                            <span className="secret-k">Valor a compartir con el operador</span>
+                            <div className="secret-val">
+                              <code>{revealSecret ? secret.secret : "•".repeat(Math.min(secret.secret.length, 40))}</code>
+                              <button className="btn ghost btn-small" onClick={() => setRevealSecret((v) => !v)}>
+                                {revealSecret ? "Ocultar" : "Revelar"}
+                              </button>
+                              <button className="btn ghost btn-small" onClick={() => copy(secret.secret)}>Copiar</button>
+                            </div>
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </section>
+                  </>
                 )}
 
                 {/* ACCESOS (cuentas de login del back office del operador) */}

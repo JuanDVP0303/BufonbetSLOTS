@@ -1,3 +1,4 @@
+import os
 import uuid
 
 from django.conf import settings
@@ -23,6 +24,7 @@ from app_wallet_integration.models import Operator, PlayerSession, WalletMode
 from app_wallet_integration.permissions import HasOperatorApiKey, HasSessionToken
 from app_wallet_integration.services import generate_api_key
 from app_wallet_integration.tokens import make_session_token
+from app_wallet_integration.wallet import resolve_wallet_secret
 from app_wallet_integration.wallet import InsufficientWalletFunds, WalletError
 from common.models import Currency
 from common.pagination import paginate
@@ -42,6 +44,7 @@ from .serializers import (
     OperatorPasswordSerializer,
     OperatorUserCreateSerializer,
     PlaySpinSerializer,
+    WebhookSecretRefSerializer,
     ProviderFreeRoundSerializer,
     ProviderLaunchSerializer,
     SimulateSerializer,
@@ -917,6 +920,47 @@ class OperatorKeysView(APIView):
         )
 
 
+def _webhook_secret_status(operator):
+    """
+    Estado del secreto HMAC del webhook de un operador, para el Master.
+    `webhook_hmac_secret_ref` guarda una REFERENCIA (nombre de env var, recomendado) o
+    el valor literal; `resolve_wallet_secret` devuelve el valor resuelto para revelar.
+    """
+    ref = (operator.webhook_hmac_secret_ref or "").strip()
+    secret = resolve_wallet_secret(operator)
+    return {
+        "ref": ref,
+        # ¿El ref es el NOMBRE de una env var definida en el servidor? (camino seguro)
+        "is_env_var": bool(ref) and ref in os.environ,
+        "configured": bool(secret),
+        "secret": secret or "",
+        "wallet_mode": operator.wallet_mode,
+        "seamless": operator.wallet_mode == WalletMode.SEAMLESS,
+    }
+
+
+class OperatorWebhookSecretView(APIView):
+    """
+    (Master) Secreto HMAC del webhook del operador (cabecera X-SlotForge-Signature).
+    GET: estado + valor resuelto (para revelar/copiar). PUT: fija la referencia
+    (nombre de env var recomendado, o valor literal). El valor real vive en el .env.
+    """
+
+    permission_classes = [IsMaster]
+
+    def get(self, request, code):
+        operator = get_object_or_404(Operator, code=code)
+        return Response(_webhook_secret_status(operator))
+
+    def put(self, request, code):
+        operator = get_object_or_404(Operator, code=code)
+        ser = WebhookSecretRefSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        operator.webhook_hmac_secret_ref = ser.validated_data["ref"].strip()
+        operator.save(update_fields=["webhook_hmac_secret_ref"])
+        return Response(_webhook_secret_status(operator))
+
+
 class OperatorUsersView(APIView):
     """
     (Master) Cuentas de ACCESO (login) de un operador para su back office.
@@ -1164,6 +1208,26 @@ class OperatorMePlayersView(APIView):
 
     def get(self, request):
         return Response(_operator_players_response(request, request.operator))
+
+
+class OperatorMeWebhookSecretView(APIView):
+    """
+    (Operador) MI secreto HMAC del webhook, SOLO LECTURA — para copiarlo y verificar
+    con él las llamadas firmadas (X-SlotForge-Signature) en mi billetera. No expone la
+    referencia interna (nombre de env var), solo el valor a usar.
+    """
+
+    permission_classes = [IsOperatorUser]
+
+    def get(self, request):
+        op = request.operator
+        secret = resolve_wallet_secret(op)
+        return Response({
+            "configured": bool(secret),
+            "secret": secret or "",
+            "seamless": op.wallet_mode == WalletMode.SEAMLESS,
+            "wallet_base_url": op.wallet_base_url or "",
+        })
 
 
 class MasterOperatorsReportView(APIView):

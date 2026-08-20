@@ -178,3 +178,27 @@ export const getOperatorPlayers = (token: string, code: string, page = 1, pageSi
 
 export const getOperatorsReport = (token: string) =>
   apiFetch<OperatorsReport>("/master/reports/operators/", { token });
+
+/** Estado del secreto HMAC del webhook (X-SlotForge-Signature) — vista Master. */
+export interface WebhookSecretStatus {
+  /** Referencia guardada: nombre de env var (recomendado) o valor literal. */
+  ref: string;
+  /** true si `ref` es el nombre de una env var definida en el servidor (camino seguro). */
+  is_env_var: boolean;
+  /** true si resuelve a un secreto usable. */
+  configured: boolean;
+  /** Valor resuelto (para revelar/copiar). */
+  secret: string;
+  wallet_mode: string;
+  seamless: boolean;
+}
+
+export const getOperatorWebhookSecret = (token: string, code: string) =>
+  apiFetch<WebhookSecretStatus>(`/master/operators/${code}/webhook-secret/`, { token });
+
+export const setOperatorWebhookSecret = (token: string, code: string, ref: string) =>
+  apiFetch<WebhookSecretStatus>(`/master/operators/${code}/webhook-secret/`, {
+    method: "PUT",
+    body: { ref },
+    token,
+  });
