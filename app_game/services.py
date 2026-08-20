@@ -412,9 +412,21 @@ def launch_operator_session(*, operator, game, external_player_id, currency, bal
         player_session.demo_balance = balance
         player_session.save(update_fields=["demo_balance"])
 
-    session = GameSession.objects.create(
-        game=game, player_session=player_session, is_open=True, currency=currency
+    # Reutiliza la GameSession ABIERTA de este jugador+juego si existe, para que el
+    # estado con memoria (feature_state: tiradas gratis en curso) PERSISTA al cerrar y
+    # volver a abrir el juego. Solo abre una nueva si no hay ninguna abierta. (Igual que
+    # el flujo interno; filter().first() tolera duplicados de StrictMode.)
+    session = (
+        GameSession.objects.filter(
+            game=game, player_session=player_session, is_open=True
+        )
+        .order_by("created_at")
+        .first()
     )
+    if session is None:
+        session = GameSession.objects.create(
+            game=game, player_session=player_session, is_open=True, currency=currency
+        )
     return session
 
 

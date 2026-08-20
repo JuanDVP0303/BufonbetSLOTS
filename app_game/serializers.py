@@ -244,6 +244,24 @@ class WebhookSecretRefSerializer(serializers.Serializer):
     )
 
 
+class WalletConfigSerializer(serializers.Serializer):
+    """
+    Modo de billetera del operador y URL base del webhook. Bufonbet/SlotForge llamará a
+    <wallet_base_url>/slotforge/wallet/{debit,credit,rollback}/. En SEAMLESS la URL es
+    obligatoria; en DEMO puede ir vacía (no se usa billetera externa).
+    """
+
+    wallet_mode = serializers.ChoiceField(choices=["DEMO", "SEAMLESS"])
+    wallet_base_url = serializers.URLField(required=False, allow_blank=True, default="")
+
+    def validate(self, data):
+        if data["wallet_mode"] == "SEAMLESS" and not (data.get("wallet_base_url") or "").strip():
+            raise serializers.ValidationError(
+                {"wallet_base_url": "Requerida en modo SEAMLESS (billetera real del operador)."}
+            )
+        return data
+
+
 class SimulateSerializer(serializers.Serializer):
     spins = serializers.IntegerField(min_value=1000, max_value=1_000_000, required=False, default=100_000)
     bet_amount = serializers.IntegerField(min_value=1, required=False, allow_null=True, default=None)

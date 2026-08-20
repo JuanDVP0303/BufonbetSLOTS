@@ -94,6 +94,9 @@ export class SlotScene extends Phaser.Scene {
   // Temporizador del PRÓXIMO giro automático. Se guarda para poder CANCELARLO al
   // pulsar "parar" (si no, el giro ya programado saltaba igual y "no se detenía").
   private autoTimer?: Phaser.Time.TimerEvent;
+  // Durante las tiradas gratis, el jugador puede PAUSAR el encadenado automático con
+  // el botón AUTO para tirarlas a mano. true = pausado (no encadena la siguiente).
+  private freePaused = false;
 
   // Música de fondo del casino (opcional) y su botón de encendido/apagado.
   private music?: Phaser.Sound.BaseSound;
@@ -132,6 +135,7 @@ export class SlotScene extends Phaser.Scene {
     // estado del autoplay a mano para que no quede "pegado" en ON tras un resize.
     this.autoOn = false;
     this.busy = false;
+    this.freePaused = false;
     this.autoTimer?.remove(false);
     this.autoTimer = undefined;
 
@@ -670,6 +674,17 @@ export class SlotScene extends Phaser.Scene {
   }
 
   private toggleAuto() {
+    // Durante las tiradas gratis, AUTO pausa/reanuda el encadenado automático (el
+    // jugador pidió poder detenerlo y tirarlas a mano).
+    if (this.freeSpinsRemaining > 0) {
+      this.freePaused = !this.freePaused;
+      this.autoToggle?.setActive(!this.freePaused);
+      this.autoTimer?.remove(false); // cancela la tirada gratis ya programada
+      this.autoTimer = undefined;
+      if (!this.freePaused && !this.busy) this.onSpin(); // reanudar: sigue solo
+      sfx.reelStop();
+      return;
+    }
     if (this.autoOn) {
       this.stopAuto(); // parar: apaga el estado Y cancela el giro ya programado
     } else {
@@ -823,6 +838,7 @@ export class SlotScene extends Phaser.Scene {
   // el contador y activa/desactiva la ronda.
   private updateFreeSpins(resp: SpinResponse) {
     if ((resp.scatter_count ?? 0) > 0) this.highlightScatters(resp.matrix);
+    const wasActive = this.freeSpinsRemaining > 0;
     const remaining = resp.free_spins_remaining ?? 0;
     const justTriggered = !!resp.free_spins_triggered && !resp.in_free_spins;
     this.freeSpinsRemaining = remaining;
@@ -833,6 +849,17 @@ export class SlotScene extends Phaser.Scene {
       this.freeMultiplier = 1; // el multiplicador aplica en las tiradas libres siguientes
       this.announceFreeSpins(resp.free_spins_awarded ?? remaining);
     }
+
+    // El botón AUTO refleja el encadenado de tiradas gratis: activo mientras corren (salvo
+    // que estén pausadas). Al terminar la ronda, resetea la pausa y vuelve a mostrar el
+    // estado del autoplay real.
+    if (remaining > 0) {
+      this.autoToggle?.setActive(!this.freePaused);
+    } else if (wasActive) {
+      this.freePaused = false;
+      this.autoToggle?.setActive(this.autoOn);
+    }
+
     this.renderFreeSpinsBadge();
   }
 
@@ -906,10 +933,13 @@ export class SlotScene extends Phaser.Scene {
 
   // Encadena el siguiente giro automático (autoplay) o la siguiente TIRADA GRATIS.
   private maybeAutoNext() {
-    // Ronda de tiradas gratis: encadena sola hasta agotarse (no consume saldo).
+    // Ronda de tiradas gratis: encadena sola hasta agotarse (no consume saldo), salvo
+    // que el jugador la haya PAUSADO con AUTO. El temporizador se guarda para poder
+    // cancelarlo al pausar.
     if (this.freeSpinsRemaining > 0) {
-      this.time.delayedCall(this.turbo ? 260 : 900, () => {
-        if (!this.busy) this.onSpin();
+      if (this.freePaused) return;
+      this.autoTimer = this.time.delayedCall(this.turbo ? 260 : 900, () => {
+        if (!this.busy && this.freeSpinsRemaining > 0 && !this.freePaused) this.onSpin();
       });
       return;
     }

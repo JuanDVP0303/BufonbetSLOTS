@@ -12,6 +12,7 @@ import {
   OperatorUserRow,
   OperatorsReport,
   Paginated,
+  WalletConfig,
   WebhookSecretStatus,
   assignOperatorGame,
   createOperator,
@@ -20,6 +21,7 @@ import {
   getOperatorPlayers,
   getOperatorPlays,
   getOperatorSpins,
+  getOperatorWalletConfig,
   getOperatorWebhookSecret,
   getOperatorsReport,
   listOperatorGames,
@@ -27,6 +29,7 @@ import {
   listOperatorUsers,
   listOperators,
   setOperatorUserPassword,
+  setOperatorWalletConfig,
   setOperatorWebhookSecret,
 } from "../api/operators";
 import { MasterNav } from "../components/MasterNav";
@@ -63,6 +66,11 @@ export default function MasterOperatorsPage() {
   const [secretRef, setSecretRef] = useState("");
   const [revealSecret, setRevealSecret] = useState(false);
   const [savingSecret, setSavingSecret] = useState(false);
+  // Webhook / billetera del operador (URL base que Bufonbet llamará).
+  const [wallet, setWallet] = useState<WalletConfig | null>(null);
+  const [walletMode, setWalletMode] = useState("DEMO");
+  const [walletUrl, setWalletUrl] = useState("");
+  const [savingWallet, setSavingWallet] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [name, setName] = useState("");
   // Modales de cuentas: crear cuenta / cambiar contraseña.
@@ -103,6 +111,10 @@ export default function MasterOperatorsPage() {
       const st = await getOperatorWebhookSecret(token!, code);
       setSecret(st);
       setSecretRef(st.ref);
+      const wc = await getOperatorWalletConfig(token!, code);
+      setWallet(wc);
+      setWalletMode(wc.wallet_mode);
+      setWalletUrl(wc.wallet_base_url);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Error al cargar el operador");
     }
@@ -169,6 +181,25 @@ export default function MasterOperatorsPage() {
       alert(err instanceof Error ? err.message : "Error al guardar el secreto");
     } finally {
       setSavingSecret(false);
+    }
+  }
+
+  async function saveWallet() {
+    if (!selected) return;
+    setSavingWallet(true);
+    try {
+      const wc = await setOperatorWalletConfig(token!, selected, {
+        wallet_mode: walletMode,
+        wallet_base_url: walletUrl.trim(),
+      });
+      setWallet(wc);
+      setWalletMode(wc.wallet_mode);
+      setWalletUrl(wc.wallet_base_url);
+      await loadOperators(); // refresca el badge de modo en la lista
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Error al guardar la billetera");
+    } finally {
+      setSavingWallet(false);
     }
   }
 
@@ -502,6 +533,68 @@ export default function MasterOperatorsPage() {
                             ))}
                           </tbody>
                         </table>
+                      </div>
+                    )}
+                  </section>
+
+                  {/* WEBHOOK / BILLETERA DEL OPERADOR (URL base que Bufonbet llamará) */}
+                  <section className="card">
+                    <div className="card-head">
+                      <h2>Webhook / Billetera del operador</h2>
+                      {wallet && (wallet.wallet_mode === "SEAMLESS"
+                        ? <span className="badge ok">Seamless</span>
+                        : <span className="badge">Demo</span>)}
+                    </div>
+                    <p className="muted">
+                      URL base de la billetera del casino. En modo Seamless, Bufonbet llamará a
+                      estos endpoints (débito/crédito/rollback) con dinero real, firmados con el
+                      secreto HMAC de abajo.
+                    </p>
+                    <div className="filter-row">
+                      <label className="field sm">
+                        <span>Modo</span>
+                        <select value={walletMode} onChange={(e) => setWalletMode(e.target.value)}>
+                          <option value="DEMO">Demo (saldo interno)</option>
+                          <option value="SEAMLESS">Seamless (billetera real)</option>
+                        </select>
+                      </label>
+                      <label className="field">
+                        <span>URL base del webhook</span>
+                        <input
+                          type="url"
+                          placeholder="https://casino.com/api"
+                          value={walletUrl}
+                          onChange={(e) => setWalletUrl(e.target.value)}
+                          autoCapitalize="off"
+                          autoCorrect="off"
+                          spellCheck={false}
+                        />
+                      </label>
+                    </div>
+                    <div className="secret-actions">
+                      <button
+                        className="btn primary btn-small"
+                        onClick={saveWallet}
+                        disabled={
+                          savingWallet ||
+                          (walletMode === (wallet?.wallet_mode ?? "") &&
+                            walletUrl.trim() === (wallet?.wallet_base_url ?? ""))
+                        }
+                      >
+                        {savingWallet ? "Guardando…" : "Guardar"}
+                      </button>
+                    </div>
+                    {wallet && wallet.endpoints.debit && (
+                      <div className="secret-reveal">
+                        <span className="secret-k">Endpoints que Bufonbet llamará</span>
+                        {(["debit", "credit", "rollback"] as const).map((k) => (
+                          <div className="secret-val" key={k}>
+                            <code>{wallet.endpoints[k]}</code>
+                            <button className="btn ghost btn-small" onClick={() => copy(wallet.endpoints[k])}>
+                              Copiar
+                            </button>
+                          </div>
+                        ))}
                       </div>
                     )}
                   </section>

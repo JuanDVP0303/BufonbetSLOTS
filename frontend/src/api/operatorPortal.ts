@@ -31,6 +31,7 @@ export interface MyWebhookSecret {
   secret: string;
   seamless: boolean;
   wallet_base_url: string;
+  endpoints: { debit: string; credit: string; rollback: string };
 }
 
 export const getMyWebhookSecret = (token: string) =>

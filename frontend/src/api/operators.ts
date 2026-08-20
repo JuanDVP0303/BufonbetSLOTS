@@ -202,3 +202,27 @@ export const setOperatorWebhookSecret = (token: string, code: string, ref: strin
     body: { ref },
     token,
   });
+
+/** Modo de billetera + URL base del webhook (endpoints que Bufonbet llamará). */
+export interface WalletEndpoints {
+  debit: string;
+  credit: string;
+  rollback: string;
+}
+export interface WalletConfig {
+  wallet_mode: string;
+  wallet_base_url: string;
+  endpoints: WalletEndpoints;
+}
+
+export const getOperatorWalletConfig = (token: string, code: string) =>
+  apiFetch<WalletConfig>(`/master/operators/${code}/wallet-config/`, { token });
+
+export const setOperatorWalletConfig = (
+  token: string, code: string, body: { wallet_mode: string; wallet_base_url: string }
+) =>
+  apiFetch<WalletConfig>(`/master/operators/${code}/wallet-config/`, {
+    method: "PUT",
+    body,
+    token,
+  });

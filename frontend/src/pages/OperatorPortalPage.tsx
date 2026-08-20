@@ -162,10 +162,18 @@ export default function OperatorPortalPage() {
                 <button className="btn ghost btn-small" onClick={() => copy(secret.secret)}>Copiar</button>
               </div>
             </div>
-            {secret.wallet_base_url && (
-              <p className="secret-hint muted">
-                Billetera configurada: <code>{secret.wallet_base_url}</code>
-              </p>
+            {secret.endpoints?.debit && (
+              <div className="secret-reveal">
+                <span className="secret-k">Endpoints que Bufonbet llamará en tu billetera</span>
+                {(["debit", "credit", "rollback"] as const).map((k) => (
+                  <div className="secret-val" key={k}>
+                    <code>{secret.endpoints[k]}</code>
+                    <button className="btn ghost btn-small" onClick={() => copy(secret.endpoints[k])}>
+                      Copiar
+                    </button>
+                  </div>
+                ))}
+              </div>
             )}
           </section>
         )}

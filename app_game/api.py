@@ -44,6 +44,7 @@ from .serializers import (
     OperatorPasswordSerializer,
     OperatorUserCreateSerializer,
     PlaySpinSerializer,
+    WalletConfigSerializer,
     WebhookSecretRefSerializer,
     ProviderFreeRoundSerializer,
     ProviderLaunchSerializer,
@@ -1002,6 +1003,44 @@ class OperatorWebhookSecretView(APIView):
         return Response(_webhook_secret_status(operator))
 
 
+def _wallet_endpoints(base):
+    """Los 3 endpoints concretos del webhook que Bufonbet/SlotForge llamará."""
+    base = (base or "").rstrip("/")
+    if not base:
+        return {"debit": "", "credit": "", "rollback": ""}
+    return {a: f"{base}/slotforge/wallet/{a}/" for a in ("debit", "credit", "rollback")}
+
+
+def _wallet_config(operator):
+    return {
+        "wallet_mode": operator.wallet_mode,
+        "wallet_base_url": operator.wallet_base_url or "",
+        "endpoints": _wallet_endpoints(operator.wallet_base_url),
+    }
+
+
+class OperatorWalletConfigView(APIView):
+    """
+    (Master) Modo de billetera y URL base del webhook del operador. Bufonbet/SlotForge
+    llamará a <wallet_base_url>/slotforge/wallet/{debit,credit,rollback}/.
+    """
+
+    permission_classes = [IsMaster]
+
+    def get(self, request, code):
+        operator = get_object_or_404(Operator, code=code)
+        return Response(_wallet_config(operator))
+
+    def put(self, request, code):
+        operator = get_object_or_404(Operator, code=code)
+        ser = WalletConfigSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        operator.wallet_mode = ser.validated_data["wallet_mode"]
+        operator.wallet_base_url = (ser.validated_data.get("wallet_base_url") or "").strip()
+        operator.save(update_fields=["wallet_mode", "wallet_base_url"])
+        return Response(_wallet_config(operator))
+
+
 class OperatorUsersView(APIView):
     """
     (Master) Cuentas de ACCESO (login) de un operador para su back office.
@@ -1268,6 +1307,8 @@ class OperatorMeWebhookSecretView(APIView):
             "secret": secret or "",
             "seamless": op.wallet_mode == WalletMode.SEAMLESS,
             "wallet_base_url": op.wallet_base_url or "",
+            # Los endpoints que Bufonbet/SlotForge llamará en tu billetera.
+            "endpoints": _wallet_endpoints(op.wallet_base_url),
         })
 
 
