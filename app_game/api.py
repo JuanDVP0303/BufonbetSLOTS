@@ -1312,6 +1312,27 @@ class OperatorMeWebhookSecretView(APIView):
         })
 
 
+class OperatorMeWalletConfigView(APIView):
+    """
+    (Operador) MI config de billetera/webhook: modo + URL base. EDITABLE por el propio
+    operador (es su endpoint). Los 3 endpoints se derivan de la URL base.
+    """
+
+    permission_classes = [IsOperatorUser]
+
+    def get(self, request):
+        return Response(_wallet_config(request.operator))
+
+    def put(self, request):
+        op = request.operator
+        ser = WalletConfigSerializer(data=request.data)
+        ser.is_valid(raise_exception=True)
+        op.wallet_mode = ser.validated_data["wallet_mode"]
+        op.wallet_base_url = (ser.validated_data.get("wallet_base_url") or "").strip()
+        op.save(update_fields=["wallet_mode", "wallet_base_url"])
+        return Response(_wallet_config(op))
+
+
 class MasterOperatorsReportView(APIView):
     """
     (Master) Overview GLOBAL de todos los operadores, consolidado en USD.

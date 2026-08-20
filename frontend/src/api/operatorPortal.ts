@@ -36,3 +36,18 @@ export interface MyWebhookSecret {
 
 export const getMyWebhookSecret = (token: string) =>
   apiFetch<MyWebhookSecret>("/operator/me/webhook-secret/", { token });
+
+/** MI config de billetera/webhook (editable por el propio operador). */
+export interface MyWalletConfig {
+  wallet_mode: string;
+  wallet_base_url: string;
+  endpoints: { debit: string; credit: string; rollback: string };
+}
+
+export const getMyWalletConfig = (token: string) =>
+  apiFetch<MyWalletConfig>("/operator/me/wallet-config/", { token });
+
+export const setMyWalletConfig = (
+  token: string, body: { wallet_mode: string; wallet_base_url: string }
+) =>
+  apiFetch<MyWalletConfig>("/operator/me/wallet-config/", { method: "PUT", body, token });

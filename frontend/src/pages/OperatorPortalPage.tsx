@@ -3,12 +3,15 @@ import { useAuth } from "../auth/AuthContext";
 import { CurrencyInfo, listCurrencies } from "../api/master";
 import { OperatorPlayer, OperatorSpin, Paginated } from "../api/operators";
 import {
+  MyWalletConfig,
   MyWebhookSecret,
   OperatorMe,
   getMyOperator,
   getMyOperatorPlayers,
   getMyOperatorSpins,
+  getMyWalletConfig,
   getMyWebhookSecret,
+  setMyWalletConfig,
 } from "../api/operatorPortal";
 import { Pager } from "../components/Pager";
 
@@ -24,6 +27,11 @@ export default function OperatorPortalPage() {
   const [tab, setTab] = useState<"overview" | "players" | "spins">("overview");
   const [secret, setSecret] = useState<MyWebhookSecret | null>(null);
   const [revealSecret, setRevealSecret] = useState(false);
+  // Config de billetera/webhook, editable por el propio operador.
+  const [wallet, setWallet] = useState<MyWalletConfig | null>(null);
+  const [walletMode, setWalletMode] = useState("DEMO");
+  const [walletUrl, setWalletUrl] = useState("");
+  const [savingWallet, setSavingWallet] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const curMap = new Map(currencies.map((c) => [c.code, c]));
@@ -43,10 +51,31 @@ export default function OperatorPortalPage() {
       setMe(await getMyOperator(token!));
       setCurrencies(await listCurrencies(token!));
       setSecret(await getMyWebhookSecret(token!));
+      const wc = await getMyWalletConfig(token!);
+      setWallet(wc);
+      setWalletMode(wc.wallet_mode);
+      setWalletUrl(wc.wallet_base_url);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Error al cargar");
     }
   }, [token]);
+
+  async function saveWallet() {
+    setSavingWallet(true);
+    try {
+      const wc = await setMyWalletConfig(token!, {
+        wallet_mode: walletMode,
+        wallet_base_url: walletUrl.trim(),
+      });
+      setWallet(wc);
+      setWalletMode(wc.wallet_mode);
+      setWalletUrl(wc.wallet_base_url);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Error al guardar la billetera");
+    } finally {
+      setSavingWallet(false);
+    }
+  }
 
   async function copy(text: string) {
     try {
@@ -141,16 +170,76 @@ export default function OperatorPortalPage() {
           </section>
         )}
 
+        {tab === "overview" && wallet && (
+          <section className="card">
+            <div className="card-head">
+              <h2>Webhook / Billetera</h2>
+              {wallet.wallet_mode === "SEAMLESS"
+                ? <span className="badge ok">Seamless</span>
+                : <span className="badge">Demo</span>}
+            </div>
+            <p className="muted">
+              URL base de TU billetera. Bufonbet llamará a los endpoints de abajo
+              (débito/crédito/rollback), que se derivan de esta URL. Editable.
+            </p>
+            <div className="filter-row">
+              <label className="field sm">
+                <span>Modo</span>
+                <select value={walletMode} onChange={(e) => setWalletMode(e.target.value)}>
+                  <option value="DEMO">Demo (saldo interno)</option>
+                  <option value="SEAMLESS">Seamless (billetera real)</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>URL base del webhook</span>
+                <input
+                  type="url"
+                  placeholder="https://tu-casino.com/api"
+                  value={walletUrl}
+                  onChange={(e) => setWalletUrl(e.target.value)}
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                />
+              </label>
+            </div>
+            <div className="secret-actions">
+              <button
+                className="btn primary btn-small"
+                onClick={saveWallet}
+                disabled={
+                  savingWallet ||
+                  (walletMode === wallet.wallet_mode && walletUrl.trim() === wallet.wallet_base_url)
+                }
+              >
+                {savingWallet ? "Guardando…" : "Guardar"}
+              </button>
+            </div>
+            {wallet.endpoints.debit && (
+              <div className="secret-reveal">
+                <span className="secret-k">Endpoints que Bufonbet llamará</span>
+                {(["debit", "credit", "rollback"] as const).map((k) => (
+                  <div className="secret-val" key={k}>
+                    <code>{wallet.endpoints[k]}</code>
+                    <button className="btn ghost btn-small" onClick={() => copy(wallet.endpoints[k])}>
+                      Copiar
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
+
         {tab === "overview" && secret?.configured && (
           <section className="card">
             <div className="card-head">
-              <h2>Integración · Firma de webhooks</h2>
+              <h2>Firma de webhooks (HMAC)</h2>
               <span className="muted">HMAC-SHA256</span>
             </div>
             <p className="muted">
               Verifica con este secreto la cabecera <code>X-SlotForge-Signature</code> de las
-              llamadas a tu billetera (débito/crédito/rollback). Es de solo lectura: si necesitas
-              rotarlo, pídelo al proveedor.
+              llamadas a tu billetera. Es de solo lectura: si necesitas rotarlo, pídelo al proveedor.
             </p>
             <div className="secret-reveal">
               <span className="secret-k">Secreto HMAC</span>
@@ -162,19 +251,6 @@ export default function OperatorPortalPage() {
                 <button className="btn ghost btn-small" onClick={() => copy(secret.secret)}>Copiar</button>
               </div>
             </div>
-            {secret.endpoints?.debit && (
-              <div className="secret-reveal">
-                <span className="secret-k">Endpoints que Bufonbet llamará en tu billetera</span>
-                {(["debit", "credit", "rollback"] as const).map((k) => (
-                  <div className="secret-val" key={k}>
-                    <code>{secret.endpoints[k]}</code>
-                    <button className="btn ghost btn-small" onClick={() => copy(secret.endpoints[k])}>
-                      Copiar
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
           </section>
         )}
 
