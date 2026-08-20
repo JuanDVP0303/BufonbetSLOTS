@@ -91,6 +91,9 @@ export class SlotScene extends Phaser.Scene {
   private fsBadgeText?: Phaser.GameObjects.Text;
   private turboToggle?: Toggle;
   private autoToggle?: Toggle;
+  // Temporizador del PRÓXIMO giro automático. Se guarda para poder CANCELARLO al
+  // pulsar "parar" (si no, el giro ya programado saltaba igual y "no se detenía").
+  private autoTimer?: Phaser.Time.TimerEvent;
 
   // Música de fondo del casino (opcional) y su botón de encendido/apagado.
   private music?: Phaser.Sound.BaseSound;
@@ -123,6 +126,14 @@ export class SlotScene extends Phaser.Scene {
     this.accent = hexToNum(this.runtime.theme?.accent_color, 0xffd23f);
     this.accentHex = `#${this.accent.toString(16).padStart(6, "0")}`;
     this.turbo = (this.registry.get("turbo") as boolean) ?? false;
+
+    // Phaser REUTILIZA la instancia de la escena en scene.restart() (p. ej. al
+    // redimensionar): los campos de clase NO se reinicializan solos. Reseteamos el
+    // estado del autoplay a mano para que no quede "pegado" en ON tras un resize.
+    this.autoOn = false;
+    this.busy = false;
+    this.autoTimer?.remove(false);
+    this.autoTimer = undefined;
 
     this.computeLayout();
     this.drawBackground();
@@ -659,10 +670,14 @@ export class SlotScene extends Phaser.Scene {
   }
 
   private toggleAuto() {
-    this.autoOn = !this.autoOn;
-    this.autoToggle?.setActive(this.autoOn);
+    if (this.autoOn) {
+      this.stopAuto(); // parar: apaga el estado Y cancela el giro ya programado
+    } else {
+      this.autoOn = true;
+      this.autoToggle?.setActive(true);
+      if (!this.busy) this.onSpin();
+    }
     sfx.reelStop();
-    if (this.autoOn && !this.busy) this.onSpin();
   }
 
   private changeBet(dir: number) {
@@ -903,15 +918,18 @@ export class SlotScene extends Phaser.Scene {
       this.stopAuto();
       return;
     }
-    this.time.delayedCall(this.turbo ? 140 : 520, () => {
+    this.autoTimer = this.time.delayedCall(this.turbo ? 140 : 520, () => {
       if (this.autoOn && !this.busy) this.onSpin();
     });
   }
 
   private stopAuto() {
-    if (!this.autoOn) return;
     this.autoOn = false;
     this.autoToggle?.setActive(false);
+    // Mata el giro automático que estuviera en cola: sin esto, "parar" apagaba el
+    // estado pero el delayedCall ya programado seguía disparando otro giro.
+    this.autoTimer?.remove(false);
+    this.autoTimer = undefined;
   }
 
   // -------------------------------------------------------------------- //
