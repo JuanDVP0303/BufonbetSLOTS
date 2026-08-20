@@ -167,6 +167,12 @@ class ProviderLaunchView(APIView):
         }
         cur = Currency.objects.filter(code=currency).first()
         token = make_session_token(session)
+        # Base del embed: si es ruta relativa (p. ej. "/embed"), se resuelve contra el
+        # host:puerto de esta petición → el iframe sale del mismo origen donde vive la app
+        # (dinámico, respeta X-Forwarded-Host/Port). Si es absoluta, se usa tal cual.
+        embed_base = settings.EMBED_BASE_URL
+        if embed_base.startswith("/"):
+            embed_base = f"{_public_origin(request)}{embed_base}"
         return Response(
             {
                 "game_session": session.id,
@@ -175,7 +181,7 @@ class ProviderLaunchView(APIView):
                 "session_token": token,
                 # URL lista para incrustar: <iframe src="embed_url">. El operador no
                 # necesita construir nada, solo ponerla en un iframe.
-                "embed_url": f"{settings.EMBED_BASE_URL}?t={token}",
+                "embed_url": f"{embed_base}?t={token}",
                 "game": game.slug,
                 "grid": {"cols": game.grid_cols, "rows": game.grid_rows},
                 "win_mode": game.win_mode,
@@ -227,6 +233,41 @@ def _bet_config(game, currency):
     }
 
 
+def _host_has_port(host):
+    """¿El host ya incluye puerto? (cuida IPv6 '[::1]:8080' vs '[::1]')."""
+    return host.rfind(":") > host.rfind("]")
+
+
+def _public_origin(request):
+    """
+    Origen público (esquema://host[:puerto]) por donde REALMENTE se llega a la app, para
+    construir URLs absolutas que consume el operador desde otro origen. Es dinámico: sigue
+    al host/puerto de la petición, sin hardcodear el puerto.
+
+    Detrás de un proxy/gateway, `build_absolute_uri` mete el puerto solo si viene dentro del
+    Host header; si el gateway reenvía el Host sin puerto pero manda X-Forwarded-Port, Django
+    NO lo añade. Aquí sí lo añadimos (cuando USE_X_FORWARDED_PORT está activo). PUBLIC_BASE_URL
+    sigue disponible como override explícito.
+    """
+    if settings.PUBLIC_BASE_URL:
+        return settings.PUBLIC_BASE_URL
+    scheme = request.scheme  # respeta SECURE_PROXY_SSL_HEADER (X-Forwarded-Proto)
+    host = request.get_host()  # respeta USE_X_FORWARDED_HOST; puede traer o no el puerto
+    if not _host_has_port(host) and settings.USE_X_FORWARDED_PORT:
+        xf_port = request.META.get("HTTP_X_FORWARDED_PORT")
+        default = "443" if scheme == "https" else "80"
+        if xf_port and xf_port != default:
+            host = f"{host}:{xf_port}"
+    return f"{scheme}://{host}"
+
+
+def _public_media_url(request, fieldfile):
+    """URL absoluta de un archivo de media para consumo EXTERNO (operador en otro origen)."""
+    if not fieldfile:
+        return None
+    return f"{_public_origin(request)}{fieldfile.url}"
+
+
 class ProviderGamesView(APIView):
     """
     GET /api/v1/provider/games/  (operador externo, autenticado por API key)
@@ -262,7 +303,7 @@ class ProviderGamesView(APIView):
                 "win_mode": g.win_mode,
                 "background_color": g.background_color,
                 # URL absoluta para que el operador (otro origen) pueda mostrar la imagen.
-                "thumbnail": request.build_absolute_uri(g.thumbnail.url) if g.thumbnail else None,
+                "thumbnail": _public_media_url(request, g.thumbnail),
                 "currencies": currencies,
             })
         return Response(out)
