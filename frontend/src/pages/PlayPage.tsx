@@ -26,6 +26,22 @@ export default function PlayPage() {
   const [paytable, setPaytable] = useState<Paytable | null>(null);
   const [showHelp, setShowHelp] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // CORRECCIÓN D1 (punto 6, SOLO ESCRITORIO): botón de pantalla completa en
+  // el MISMO header que atrás/salir — la función real la entrega
+  // SlotGameCanvas (ahí vive el juego de Phaser). `null` en móvil (nunca se
+  // llama a onFullscreenReady ahí), así que el botón no se muestra.
+  const [toggleFullscreen, setToggleFullscreen] = useState<(() => void) | null>(null);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  // SOLO MÓVIL: altura real (fracción 0-1) del ícono de SONIDO dentro del
+  // canvas (ver computeLayoutMobile/SlotGameCanvas) — alinea el HOME del
+  // header DOM a esa misma altura en vez de quedar pegado arriba del todo.
+  // Valor por defecto razonable mientras llega el primer evento.
+  const [topIconFrac, setTopIconFrac] = useState(0.06);
+  useEffect(() => {
+    const onFsChange = () => setIsFullscreen(!!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", onFsChange);
+    return () => document.removeEventListener("fullscreenchange", onFsChange);
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -66,23 +82,43 @@ export default function PlayPage() {
       {/* HUD mínimo flotante (nav del cliente independiente; se oculta en iframe).
           El saldo/apuesta viven DENTRO del juego, en la barra inferior. */}
       <header className="hud hud-float">
-        <button className="btn ghost hud-icon" onClick={() => nav("/lobby")} title="Lobby">
-          ←
-        </button>
+        {/* Si el tema sube un ícono de home (p. ej. Dulce Fiesta), sustituye los
+            botones genéricos de atrás/salir por uno solo que vuelve al lobby —
+            salir sigue disponible desde ahí (ver LobbyPage). Sin ese asset, el
+            header sigue como siempre (flecha + logout genéricos). El botón de
+            HOME en sí NO vive acá dentro (ver más abajo): necesita alinearse
+            con el ícono de SONIDO del canvas, a una altura que no es la del
+            header (fija arriba del todo), así que se posiciona aparte. */}
+        {!theme?.assets?.home_button && (
+          <button className="btn ghost hud-icon" onClick={() => nav("/lobby")} title="Lobby">
+            ←
+          </button>
+        )}
         <div className="hud-actions">
-          <button
-            className="btn ghost hud-icon"
-            onClick={() => setShowHelp(true)}
-            title="Combinaciones ganadoras"
-            disabled={!paytable}
-          >
-            ?
-          </button>
-          <button className="btn ghost hud-icon" onClick={logout} title="Salir">
-            ⏻
-          </button>
+          {/* El botón de combinaciones ganadoras vive ahora DENTRO del juego
+              (footer de Phaser, junto a AUTO/TURBO) — ver onShowPaytable abajo. */}
+          {toggleFullscreen && (
+            <button className="btn ghost hud-icon" onClick={toggleFullscreen} title="Pantalla completa">
+              {isFullscreen ? "⤓" : "⛶"}
+            </button>
+          )}
+          {!theme?.assets?.home_button && (
+            <button className="btn ghost hud-icon" onClick={logout} title="Salir">
+              ⏻
+            </button>
+          )}
         </div>
       </header>
+      {theme?.assets?.home_button && (
+        <button
+          className="hud-icon-themed hud-icon-themed-synced"
+          style={{ top: `${topIconFrac * 100}%` }}
+          onClick={() => nav("/lobby")}
+          title="Lobby"
+        >
+          <img src={theme.assets.home_button} alt="Lobby" />
+        </button>
+      )}
       <main className="play-canvas-wrap">
         {error && <div className="center error">{error}</div>}
         {!error && !session && <div className="center muted">Cargando juego…</div>}
@@ -92,6 +128,9 @@ export default function PlayPage() {
             spin={spin}
             betAmount={bet}
             onBalance={setBalance}
+            onShowPaytable={() => setShowHelp(true)}
+            onFullscreenReady={(toggle) => setToggleFullscreen(() => toggle)}
+            onTopIconY={setTopIconFrac}
             theme={theme ?? undefined}
             grid={grid ?? undefined}
             balance={balance}

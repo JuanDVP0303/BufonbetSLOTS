@@ -105,6 +105,16 @@ class Game(BaseModel):
     prize_banner = models.ImageField(
         upload_to="themes/", blank=True, null=True, help_text="Banner del premio (bajo la rejilla)."
     )
+    jackpot_mascot = models.ImageField(
+        upload_to="themes/",
+        blank=True,
+        null=True,
+        help_text=(
+            "Animación (GIF) o imagen del personaje/escena para el premio grande "
+            "(Big/Mega/Epic Win o Jackpot). Se muestra sobre la pantalla oscurecida. "
+            "Opcional: si falta, se usa solo la celebración genérica (partículas)."
+        ),
+    )
     spin_button = models.ImageField(
         upload_to="themes/", blank=True, null=True, help_text="Imagen del botón de girar."
     )
@@ -124,6 +134,61 @@ class Game(BaseModel):
     auto_off = models.ImageField(upload_to="themes/", blank=True, null=True, help_text="Botón autoplay inactivo.")
     bet_plus = models.ImageField(upload_to="themes/", blank=True, null=True, help_text="Botón subir apuesta.")
     bet_minus = models.ImageField(upload_to="themes/", blank=True, null=True, help_text="Botón bajar apuesta.")
+    # Paneles/banners decorativos (opcionales): si faltan, esa zona se dibuja como
+    # siempre (sin fondo extra), así que no rompen ningún casino existente.
+    footer_banner = models.ImageField(
+        upload_to="themes/", blank=True, null=True,
+        help_text="Fondo de la barra inferior de controles (cubre los botones).",
+    )
+    topbar_banner = models.ImageField(
+        upload_to="themes/", blank=True, null=True,
+        help_text="Fondo detrás del marcador de GANANCIA/premio (junto a la rejilla).",
+    )
+    balance_banner = models.ImageField(
+        upload_to="themes/", blank=True, null=True, help_text="Fondo del bloque de saldo/crédito.",
+    )
+    bet_banner = models.ImageField(
+        upload_to="themes/", blank=True, null=True, help_text="Fondo del bloque de apuesta.",
+    )
+    loading_image = models.ImageField(
+        upload_to="themes/", blank=True, null=True,
+        help_text="Imagen de pantalla de carga (sustituye la barra genérica si se sube).",
+    )
+    info_button = models.ImageField(
+        upload_to="themes/", blank=True, null=True, help_text="Icono del botón de información/paytable.",
+    )
+    home_button = models.ImageField(
+        upload_to="themes/",
+        blank=True,
+        null=True,
+        help_text=(
+            "Icono para volver al lobby. Si se sube, SUSTITUYE los botones "
+            "genéricos de atrás/salir del header (el cliente muestra solo este, "
+            "sin el botón de apagar/logout) — si falta, el header sigue como "
+            "siempre (flecha atrás + logout genéricos)."
+        ),
+    )
+    reel_effect = models.ImageField(
+        upload_to="themes/",
+        blank=True,
+        null=True,
+        help_text=(
+            "Animación (GIF) decorativa a los lados de la rejilla de rodillos "
+            "(destello/brillo). Si es GIF se decodifica cuadro a cuadro, igual que "
+            "jackpot_mascot, para poder darle la profundidad exacta dentro del canvas."
+        ),
+    )
+    grid_frame = models.ImageField(
+        upload_to="themes/",
+        blank=True,
+        null=True,
+        help_text=(
+            "Marco/fondo ilustrado de la rejilla de rodillos (incluye las celdas "
+            "dibujadas). Si se sube, SUSTITUYE el panel y el borde dorado genéricos: "
+            "el cliente estira la imagen para que su rejilla interior quede exacto "
+            "detrás de los símbolos. Si falta, se dibuja el marco genérico de siempre."
+        ),
+    )
 
     class Meta:
         db_table = "game"

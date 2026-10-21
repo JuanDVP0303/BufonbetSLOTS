@@ -43,8 +43,11 @@ export const PAYLINES: number[][] = [
   [2, 1, 0], // diagonal ↗
 ];
 
-// Umbral de "Big Win": ganancia >= BIG_WIN_MULTIPLIER x apuesta.
-export const BIG_WIN_MULTIPLIER = 15;
+// Umbrales de victoria grande: ganancia >= nivel x apuesta. BIG_WIN_MULTIPLIER se
+// mantiene para no romper imports existentes (equivale a WIN_TIERS.big).
+export const WIN_TIERS = { big: 15, mega: 30, epic: 60 } as const;
+export type WinTier = "big" | "mega" | "epic" | "jackpot";
+export const BIG_WIN_MULTIPLIER = WIN_TIERS.big;
 
 // Textura keys generadas y del chrome del casino (cargadas en PreloadScene).
 export const TEX = {
@@ -68,4 +71,28 @@ export const TEX = {
   autoOff: "tex-auto-off",
   betPlus: "tex-bet-plus",
   betMinus: "tex-bet-minus",
+  infoBtn: "tex-info-btn",
+  // Animación/imagen del premio grande. Si es GIF se decodifica cuadro a cuadro
+  // (ver game/gifMascot.ts) y esta clave no se usa; si es imagen estática, se carga
+  // normal y se dibuja tal cual con la misma profundidad.
+  jackpotMascot: "tex-jackpot-mascot",
+  // Generadas en runtime (sin arte del tema): resplandor y destello para pulsos
+  // de símbolos ganadores, idle y partículas ambientales.
+  glow: "tex-glow",
+  sparkle: "tex-sparkle",
+  // Paneles/banners decorativos opcionales (si faltan, esa zona se ve como siempre).
+  footerBanner: "tex-footer-banner",
+  topbarBanner: "tex-topbar-banner",
+  balanceBanner: "tex-balance-banner",
+  betBanner: "tex-bet-banner",
+  loadingImage: "tex-loading-image",
+  // Igual que jackpotMascot: si es GIF se decodifica cuadro a cuadro (gifMascot.ts)
+  // y esta clave no se usa; si es imagen estática, se carga normal.
+  reelEffect: "tex-reel-effect",
+  // Marco/fondo ilustrado de la rejilla (incluye las celdas dibujadas). Si existe,
+  // sustituye el panel+borde genéricos de drawPanel() — ver ahí cómo se encaja.
+  gridFrame: "tex-grid-frame",
+  // Totalmente transparente (nada dibujado): zona táctil invisible para
+  // botones del HUD móvil (Fase 3) dibujados con Graphics en vez de imagen.
+  transparentPixel: "tex-transparent-px",
 } as const;

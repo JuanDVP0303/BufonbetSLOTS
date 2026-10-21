@@ -55,12 +55,41 @@ body,
     env(safe-area-inset-bottom) env(safe-area-inset-left);
 }
 
-/* Contenedor del canvas de Phaser: ocupa todo, centrado. */
+/* Contenedor del canvas de Phaser: ocupa TODA la pantalla (o el panel del
+   iframe) como "escenario" negro — igual que Pragmatic/Playtech, el juego
+   NUNCA se estira para rellenar cualquier proporción de pantalla. */
 .slot-canvas-wrap {
   position: relative;
   width: 100%;
   height: 100%;
   overflow: hidden;
+  background: #000;
+  /* `container-type` hace que los hijos puedan medirse en cqw/cqh: % del
+     tamaño de ESTE contenedor, no del viewport (clave para que funcione
+     igual en pantalla completa que embebido en un iframe más chico). */
+  container-type: size;
+}
+/* El "marco" del juego, centrado por `margin:auto` dentro del inset:0, a
+   pantalla COMPLETA en cualquier orientación — sin barras negras.
+   - Vertical (celular, modo móvil): Phaser (Scale.FIT a resolución de diseño
+     ajustada a la proporción real, ver game/config.ts) centra su lienzo
+     dentro de esta caja; el fondo del tema se pinta aparte, cover, a todo lo
+     ancho/alto de esta misma caja (ver SlotGameCanvas.tsx).
+   - Horizontal (PC/tablet apaisada, modo ESCRITORIO): CORRECCIÓN D1 (punto
+     6) — antes esta regla encogía el marco a 97%x94% ("para que no quede
+     pegado al borde"), de los tiempos en que el diseño de escritorio no
+     tenía su propio margen interno. Eso dejaba ver el `background:#000` de
+     `.slot-canvas-wrap` como una franja negra fina en los CUATRO lados — el
+     "barras negras" reportado. Ahora el margen/zona segura lo calcula el
+     propio `computeLayoutDesktop()` (CONFIG_DESKTOP.safeZone), así que el
+     marco debe llegar a pantalla completa de verdad, igual que en vertical. */
+.slot-frame {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  overflow: hidden;
+  width: 100cqw;
+  height: 100cqh;
 }
 .slot-canvas {
   position: absolute;
@@ -83,11 +112,119 @@ body,
   width: 100%;
   height: 100%;
   object-fit: cover;
+  /* CORRECCIÓN 5 (punto 5): sesga el recorte un poco hacia abajo — así se ve
+     menos del borde SUPERIOR de la imagen, justo donde suelen vivir elementos
+     decorativos (una rosquilla, una mancha oscura) que chocaban con los
+     botones de atrás/salir. No es un recorte quirúrgico del elemento exacto
+     (eso requiere ver la imagen), pero reduce su protagonismo en esa esquina. */
+  object-position: 50% 38%;
   pointer-events: none;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
 }
+
+/* SOLO MÓVIL (Fase 1): fondo "cover" a pantalla completa para imagen estática,
+   degradado o color sólido del tema — mismo rol que .slot-bg-video, pero para
+   los tipos de fondo que normalmente pinta Phaser DENTRO del canvas (lo que en
+   modo FIT dejaría barras negras en los márgenes). Ver SlotGameCanvas.tsx. */
+.slot-bg-cover {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  /* CORRECCIÓN 5 (punto 5): ver el comentario igual en .slot-bg-video. */
+  object-position: 50% 38%;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* CORRECCIÓN 5 (punto 5): viñeta oscura sutil arriba, detrás de los botones de
+   atrás/salir — para que se lean bien sin importar qué haya justo ahí en el
+   fondo del tema (rosquilla, mancha, etc.), sin depender de recortar el arte
+   a mano (eso solo se puede ajustar viendo la imagen real). */
+.slot-top-vignette {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 22%;
+  z-index: 0;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.42) 0%, rgba(0, 0, 0, 0) 100%);
+  pointer-events: none;
+}
+
+/* SOLO MÓVIL (Fase 2, regla 1): panorámica/zoom MUY lento sobre la capa de
+   fondo, para que nunca se vea estático ("nada estático" — animación sutil,
+   tipo Ken Burns). Esta clase NUNCA se aplica en escritorio. */
+/* CORRECCIÓN 2 (punto 4): el sobredimensionado original (113% + hasta 1.06x
+   más en la animación, ~120% de zoom total) empujaba elementos decorativos
+   pegados al borde de la imagen (una rosquilla arriba, una mancha
+   abajo-derecha) fuera de cuadro. Se redujo a ~106-109%, pero el recorte
+   seguía siendo visible (reportado de nuevo en CORRECCIÓN 4, punto 9).
+   CORRECCIÓN 4 (punto 9): en vez de seguir reduciendo el sobredimensionado a
+   ciegas, se elimina por completo — `object-fit: cover` YA cubre el 100% de
+   la pantalla sin necesitar zoom extra, así que cualquier % de más era
+   recorte puro sin ningún beneficio (no hacía falta para "no dejar bordes
+   vacíos": object-fit:cover nunca deja bordes vacíos, los deja SOLO si el
+   elemento es más chico que su caja, que no es el caso aquí). El fondo queda
+   estático (0% de recorte adicional sobre el que ya impone `cover` al
+   encajar la proporción de la imagen en la de la pantalla — eso es
+   inevitable con cualquier imagen cuya proporción no sea idéntica a la del
+   dispositivo, y solo se resuelve componiendo el arte con margen de
+   seguridad hacia los bordes). Si se quiere recuperar algo de movimiento más
+   adelante, debe animarse SIN agrandar el elemento (p. ej. desplazar una
+   imagen ya más grande que el contenedor en el propio asset, no vía CSS
+   `scale`), para no reintroducir este mismo bug. */
+.mobile-bg-pan {
+  width: 100%;
+  height: 100%;
+  left: 0;
+  top: 0;
+}
+
+/* Aviso de "gira tu teléfono" (Fase 1, regla 5): tapa todo el juego mientras un
+   móvil esté en horizontal, en vez de deformar el layout vertical. */
+.rotate-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #05030f;
+  padding: 24px;
+  text-align: center;
+}
+.rotate-card {
+  color: #f0f3fa;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  max-width: 320px;
+}
+.rotate-icon {
+  font-size: 48px;
+  animation: rotate-hint 1.6s ease-in-out infinite;
+}
+.rotate-card p {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+@keyframes rotate-hint {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(-90deg); }
+}
+
+/* La animación del premio grande ahora se dibuja DENTRO del canvas de Phaser
+   (ver game/gifMascot.ts + SlotScene.showMascot), con profundidad exacta entre
+   los rieles y el oscurecido — ya no es un <img> del DOM. */
 
 /* ------------------------------------------------------------------ */
 /* UI de dashboards (login, jugador, master)                          */
@@ -258,7 +395,10 @@ body {
   z-index: 10;
   background: none;
   border-bottom: none;
-  padding: 12px 14px;
+  /* CORRECCIÓN D1 (punto 6): margen de seguridad de 24px respecto al borde
+     para atrás/salir/pantalla-completa (antes 12px/14px) — SOLO escritorio;
+     móvil conserva el valor de siempre, ver el media query de abajo. */
+  padding: 24px;
   pointer-events: none;
 }
 .play-shell .hud-actions {
@@ -276,11 +416,84 @@ body {
   border-radius: 50%;
   background: rgba(12, 16, 30, 0.5);
   border: 1px solid rgba(255, 255, 255, 0.12);
-  color: #f0f3fa;
   backdrop-filter: blur(4px);
+}
+/* El botón "←"/"⏻" siempre lleva también `.btn.ghost` (ver PlayPage.tsx), cuyo
+   `color: var(--text-2)` (#3e4863, un gris-azulado OSCURO pensado para fondos
+   CLAROS de panel) tiene más especificidad (dos clases) que `.hud-icon` sola
+   (una clase) y le GANABA a cualquier `color` puesto aquí — el glifo se
+   dibujaba casi del mismo color que el propio círculo oscuro de fondo,
+   invisible en la práctica. Iguala la especificidad apuntando a las mismas
+   dos clases para que el blanco sí se aplique. */
+.btn.ghost.hud-icon {
+  color: #f0f3fa;
 }
 .hud-icon:hover {
   background: rgba(30, 38, 64, 0.7);
+}
+.hud-icon-img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 50%;
+  pointer-events: none;
+}
+
+/* Ícono de header TEMATIZADO (p. ej. home_button de Dulce Fiesta): el PNG ya
+   trae su propio botón dibujado (fondo, borde, brillo) — a diferencia de
+   `.hud-icon`, acá NO se dibuja ningún círculo/fondo de vidrio detrás, para no
+   repetir el mismo "fondo semi-transparente" que no encaja con el tema. */
+.hud-icon-themed {
+  pointer-events: auto;
+  width: 44px;
+  height: 44px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+.hud-icon-themed img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+/* Variante SINCRONIZADA (HOME en móvil): posicionada aparte del header (que
+   vive siempre arriba del todo), a la altura REAL del ícono de SONIDO del
+   canvas de Phaser — ver PlayPage.tsx (topIconFrac) y computeLayoutMobile.
+   `top` lo fija React en línea, como % de la altura de `.play-shell` (mismo
+   contenedor relative que envuelve tanto el header como el canvas). */
+.hud-icon-themed-synced {
+  position: absolute;
+  right: 16px;
+  z-index: 10;
+  transform: translateY(-50%);
+}
+@media (max-width: 820px) {
+  .hud-icon-themed {
+    width: 48px;
+    height: 48px;
+  }
+}
+
+/* CORRECCIÓN 3 (punto 3, SOLO MÓVIL): el borde de .hud-icon es casi invisible
+   (12% de opacidad) sobre un fondo claro como un cielo — se refuerzan fondo y
+   borde solo en viewports móviles; escritorio conserva el estilo de siempre.
+   CORRECCIÓN 6 (punto 7): fondo ajustado a negro 45% (antes ~60%, pedido más
+   translúcido). El color del icono ya lo fija `.btn.ghost.hud-icon` arriba
+   (con suficiente especificidad para ganarle a `.btn.ghost`) — repetirlo aquí
+   con menos especificidad no hacía nada, así que se quitó. */
+@media (max-width: 820px) {
+  .hud-icon {
+    background: rgba(0, 0, 0, 0.45);
+    border: 2px solid rgba(255, 255, 255, 0.65);
+  }
+  /* CORRECCIÓN D1 (punto 6): el padding de 24px de arriba es nuevo y es SOLO
+     para escritorio — acá se vuelve al valor de siempre para que móvil no
+     cambie. */
+  .play-shell .hud.hud-float {
+    padding: 12px 14px;
+  }
 }
 
 /* Master */
@@ -819,6 +1032,48 @@ code {
   color: var(--accent-ink);
 }
 
+/* FASE 4 DESKTOP (punto 2): atajos de teclado dentro del panel de info — solo
+   se renderiza en React cuando !isMobileDeviceClass() (ver PaytableModal.tsx),
+   así que esta sección nunca aparece en móvil. */
+.pt-shortcuts {
+  margin-top: 10px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border);
+}
+.pt-shortcuts h4 {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-2);
+  margin: 0 0 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.pt-shortcuts-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+}
+.pt-shortcut-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.pt-shortcut-row kbd {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  padding: 3px 7px;
+  background: var(--surface-3);
+  border: 1px solid var(--border-2);
+  border-radius: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text);
+}
+
 /* ---------------- Panel de operadores (multi-tenant) ---------------- */
 .operators-layout {
   display: grid;
@@ -984,6 +1239,25 @@ code {
   animation: modal-in 0.16s ease-out;
 }
 @keyframes modal-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } to { opacity: 1; transform: none; } }
+
+/* Fase 6 (SOLO MÓVIL): el panel de información (paytable) y cualquier otro
+   modal se sienten más nativos como una "hoja" que sube desde abajo, en vez
+   del fade+scale centrado de escritorio. Escritorio no entra en este media
+   query — misma animación de siempre. */
+@media (max-width: 820px) {
+  .modal-overlay { align-items: flex-end; padding: 0; }
+  .modal {
+    max-width: 100%;
+    border-radius: 20px 20px 0 0;
+    max-height: 86vh;
+    overflow-y: auto;
+    animation: modal-in-mobile 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  @keyframes modal-in-mobile {
+    from { opacity: 0; transform: translateY(100%); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
 .modal-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 18px; border-bottom: 1px solid var(--border); }
 .modal-head h3 { font-size: 17px; font-weight: 700; }
 .modal-x { background: none; border: none; color: var(--muted); font-size: 18px; cursor: pointer; padding: 4px 8px; border-radius: 8px; }

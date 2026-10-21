@@ -872,6 +872,7 @@ def build_theme(game):
             "background_video": _url(game.background_video),
             "logo": _url(game.logo),
             "prize_banner": _url(game.prize_banner),
+            "jackpot_mascot": _url(game.jackpot_mascot),
             "spin_button": _url(game.spin_button),
             "music_on": _url(game.music_on),
             "music_off": _url(game.music_off),
@@ -882,6 +883,15 @@ def build_theme(game):
             "auto_off": _url(game.auto_off),
             "bet_plus": _url(game.bet_plus),
             "bet_minus": _url(game.bet_minus),
+            "footer_banner": _url(game.footer_banner),
+            "topbar_banner": _url(game.topbar_banner),
+            "balance_banner": _url(game.balance_banner),
+            "bet_banner": _url(game.bet_banner),
+            "loading_image": _url(game.loading_image),
+            "info_button": _url(game.info_button),
+            "reel_effect": _url(game.reel_effect),
+            "grid_frame": _url(game.grid_frame),
+            "home_button": _url(game.home_button),
         },
     }
 

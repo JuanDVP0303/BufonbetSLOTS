@@ -73,7 +73,9 @@ User = get_user_model()
 GAME_IMAGE_FIELDS = {
     "thumbnail", "background_image", "logo", "prize_banner", "spin_button",
     "music_on", "music_off", "turbo_on", "turbo_off", "auto_on", "auto_off",
-    "bet_plus", "bet_minus",
+    "bet_plus", "bet_minus", "jackpot_mascot",
+    "footer_banner", "topbar_banner", "balance_banner", "bet_banner",
+    "loading_image", "info_button", "reel_effect", "grid_frame", "home_button",
 }
 GAME_FILE_FIELDS = {"music_track", "background_video"}
 

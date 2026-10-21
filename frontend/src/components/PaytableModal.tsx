@@ -1,7 +1,18 @@
 import { Paytable } from "../api/play";
 import { SYMBOL_COLOR, SYMBOL_LABEL } from "../game/constants";
+import { isMobileDeviceClass } from "../game/mobile/configMobile";
 
 const hex = (n: number) => `#${n.toString(16).padStart(6, "0")}`;
+
+// FASE 4 DESKTOP (punto 2): atajos de teclado — SOLO tienen sentido con un
+// teclado físico, así que se muestran acá (el menú de info), no como un
+// indicador permanente encima del juego. Móvil nunca los ve (isMobileDeviceClass()).
+const SHORTCUTS: [string, string][] = [
+  ["Espacio", "Girar (mantener = tirada turbo)"],
+  ["← →", "Bajar / subir apuesta"],
+  ["M", "Silenciar / activar sonido"],
+  ["F", "Pantalla completa"],
+];
 
 /** Modal con la tabla de pagos (combinaciones ganadoras) del casino actual. */
 export function PaytableModal({ paytable, onClose }: { paytable: Paytable; onClose: () => void }) {
@@ -55,6 +66,20 @@ export function PaytableModal({ paytable, onClose }: { paytable: Paytable; onClo
 
         {paytable.symbols.some((s) => s.is_wild) && (
           <p className="muted">El WILD sustituye a cualquier símbolo para completar combinaciones.</p>
+        )}
+
+        {!isMobileDeviceClass() && (
+          <div className="pt-shortcuts">
+            <h4>Atajos de teclado</h4>
+            <div className="pt-shortcuts-grid">
+              {SHORTCUTS.map(([key, desc]) => (
+                <div key={key} className="pt-shortcut-row">
+                  <kbd>{key}</kbd>
+                  <span className="muted">{desc}</span>
+                </div>
+              ))}
+            </div>
+          </div>
         )}
       </div>
     </div>

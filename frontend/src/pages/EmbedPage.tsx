@@ -79,19 +79,8 @@ export default function EmbedPage() {
 
   return (
     <div className="play-shell">
-      {/* En iframe solo dejamos el acceso a las combinaciones ganadoras. */}
-      <header className="hud hud-float">
-        <div className="hud-actions">
-          <button
-            className="btn ghost hud-icon"
-            onClick={() => setShowHelp(true)}
-            title="Combinaciones ganadoras"
-            disabled={!paytable}
-          >
-            ?
-          </button>
-        </div>
-      </header>
+      {/* El acceso a las combinaciones ganadoras vive DENTRO del juego (footer de
+          Phaser, junto a AUTO/TURBO) — ver onShowPaytable abajo. */}
       <main className="play-canvas-wrap">
         {error && <div className="center error">{error}</div>}
         {!error && !ready && <div className="center muted">Cargando juego…</div>}
@@ -101,6 +90,7 @@ export default function EmbedPage() {
             betAmount={bet}
             onBalance={setBalance}
             onSpinError={handleSpinError}
+            onShowPaytable={() => setShowHelp(true)}
             theme={theme ?? undefined}
             grid={grid ?? undefined}
             balance={balance}

@@ -14,6 +14,7 @@ export interface ThemeAssets {
   background_video: string | null;
   logo: string | null;
   prize_banner: string | null;
+  jackpot_mascot: string | null;
   spin_button: string | null;
   music_on: string | null;
   music_off: string | null;
@@ -24,6 +25,15 @@ export interface ThemeAssets {
   auto_off: string | null;
   bet_plus: string | null;
   bet_minus: string | null;
+  footer_banner: string | null;
+  topbar_banner: string | null;
+  balance_banner: string | null;
+  bet_banner: string | null;
+  loading_image: string | null;
+  info_button: string | null;
+  reel_effect: string | null;
+  grid_frame: string | null;
+  home_button: string | null;
 }
 
 export interface Theme {
