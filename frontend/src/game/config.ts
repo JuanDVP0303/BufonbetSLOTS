@@ -3,6 +3,7 @@ import { BootScene } from "./scenes/BootScene";
 import { PreloadScene } from "./scenes/PreloadScene";
 import { SlotScene } from "./scenes/SlotScene";
 import { CONFIG_MOBILE, isMobileDeviceClass } from "./mobile/configMobile";
+import { chooseLayoutMode, desktopDesignSize, desktopRenderScale, portraitDesignSize } from "./desktop/layoutDesktop";
 import type { SpinResponse } from "../api/spinApi";
 import type { Theme } from "../api/play";
 
@@ -61,62 +62,107 @@ export interface RuntimeConfig {
 export function makeGameConfig(
   parent: HTMLElement,
   runtime: RuntimeConfig,
-  // DESKTOP (Fase 1): elemento que entra en pantalla completa al activarla
-  // (ver SlotScene.toggleDesktopFullscreen). Por defecto sería solo el
-  // <canvas> — pasando el wrapper completo (.slot-canvas-wrap), el aviso de
-  // "gira tu teléfono" y cualquier capa DOM futura entran con él. Sin uso en
-  // móvil (no hay botón de pantalla completa ahí).
+  // Elemento que entra en pantalla completa (el wrapper completo, no solo el
+  // <canvas>: así entran también las capas DOM de fondo). Sin uso en táctil.
   fullscreenTarget?: HTMLElement
 ): Phaser.Types.Core.GameConfig {
-  // Fondo ANIMADO (video o GIF): el canvas se hace TRANSPARENTE y el medio se pinta
-  // como elemento HTML DETRÁS (más fiable que dentro de Phaser). Los GIF se cargan
-  // como <img> (animan nativos); los estáticos siguen dibujándose dentro de Phaser.
-  const a = runtime.theme?.assets;
-  const bgType = runtime.theme?.background_type;
-  const isGif = bgType === "IMAGE" && !!a?.background && a.background.toLowerCase().endsWith(".gif");
-  const isVideo = bgType === "VIDEO" && !!a?.background_video;
+  // Clase de DISPOSITIVO (táctil y lado chico <= 820px): no cambia en la sesión.
+  const isTouchDevice = isMobileDeviceClass();
+  const pw = parent.clientWidth || window.innerWidth;
+  const ph = parent.clientHeight || window.innerHeight;
+  // Sistema de layout por orientación (ver desktop/layoutDesktop.ts): en táctil
+  // SIEMPRE "portrait" (diseño móvil); en PC, "portrait" solo si la ventana es vertical.
+  const layoutMode = chooseLayoutMode(pw, ph, isTouchDevice);
 
-  // MÓVIL (pantalla táctil, ver isMobileDeviceClass): rama de configuración
-  // completamente aparte de ESCRITORIO, que sigue exactamente igual que antes
-  // (Scale.RESIZE al 100% del contenedor). El móvil usa Scale.FIT + autoCenter
-  // sobre una resolución de diseño de ANCHO fijo (1080) pero ALTO ajustado a
-  // la proporción REAL del contenedor (ver `mobileDesignHeight` abajo) — el
-  // fondo del tema se pinta SIEMPRE como capa HTML detrás (full-bleed, cover)
-  // para que no se vean barras negras en los márgenes del FIT — ver
-  // SlotGameCanvas.tsx. Por eso el canvas es transparent:true siempre en móvil,
-  // no solo para GIF/video como en escritorio.
-  const isMobile = isMobileDeviceClass();
+  const callbacks: Phaser.Types.Core.CallbacksConfig = {
+    preBoot: (game) => {
+      game.registry.set("runtime", runtime);
+      game.registry.set("isMobile", layoutMode === "portrait");
+      game.registry.set("isTouchDevice", isTouchDevice);
+      game.registry.set("layoutMode", layoutMode);
+    },
+  };
+
+  if (isTouchDevice) {
+    // ===== MÓVIL (táctil): configuración idéntica a la de siempre. =====
+    // Scale.FIT + autoCenter sobre 1080 de ancho y alto ajustado a la proporción
+    // REAL del contenedor (ver mobileDesignHeight). El fondo del tema lo pinta la
+    // capa HTML detrás (cover) → canvas transparente.
+    return {
+      type: Phaser.AUTO,
+      parent,
+      transparent: true,
+      backgroundColor: runtime.theme?.background_color ?? "#0b0f1a",
+      scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: CONFIG_MOBILE.design.width,
+        height: mobileDesignHeight(parent),
+      },
+      render: { antialias: true, roundPixels: true },
+      scene: [BootScene, PreloadScene, SlotScene],
+      callbacks,
+    };
+  }
+
+  // ===== ESCRITORIO (no táctil) =====
+  // Canvas OPACO: el fondo se dibuja dentro de Phaser (una imagen "cover", sin FX)
+  // y el navegador no tiene que mezclar el canvas con capas de debajo en cada
+  // frame. Solo un fondo ANIMADO (GIF/video, que es DOM) necesita transparencia.
+  const a = runtime.theme?.assets;
+  const bgUrl = a?.background_desktop || a?.background;
+  const animatedBg =
+    (runtime.theme?.background_type === "IMAGE" && !!bgUrl && bgUrl.toLowerCase().endsWith(".gif")) ||
+    (runtime.theme?.background_type === "VIDEO" && !!a?.background_video);
+  // Área base 1920x1080 con Scale.FIT + CENTER_BOTH. El ancho/alto de diseño se
+  // adapta a la proporción del contenedor (16:10, 21:9… sin barras) y la
+  // resolución INTERNA sigue a los píxeles reales que ocupa el lienzo (DPR <= 2,
+  // tope de píxeles): la escena compensa con zoom de cámara, así que el layout
+  // siempre se expresa en px de diseño. El letterbox (si lo hay) lo cubre la capa
+  // de fondo DOM, nunca barras negras.
+  let width: number;
+  let height: number;
+  if (layoutMode === "portrait") {
+    ({ width, height } = portraitDesignSize(pw, ph));
+  } else {
+    const design = desktopDesignSize(pw, ph);
+    const k = desktopRenderScale(design, pw, ph, window.devicePixelRatio);
+    width = Math.round(design.width * k);
+    height = Math.round(design.height * k);
+    const preBoot = callbacks.preBoot!;
+    callbacks.preBoot = (game) => {
+      preBoot(game);
+      game.registry.set("desktopDesign", design);
+    };
+  }
 
   return {
     type: Phaser.AUTO,
     parent,
-    transparent: isMobile ? true : isGif || isVideo,
+    transparent: animatedBg,
     backgroundColor: runtime.theme?.background_color ?? "#0b0f1a",
-    scale: isMobile
-      ? {
-          mode: Phaser.Scale.FIT,
-          autoCenter: Phaser.Scale.CENTER_BOTH,
-          width: CONFIG_MOBILE.design.width,
-          height: mobileDesignHeight(parent),
-        }
-      : {
-          // RESIZE: el lienzo ocupa TODO el contenedor (pantalla completa en PC).
-          // La escena recalcula su layout a partir del tamaño real (this.scale).
-          mode: Phaser.Scale.RESIZE,
-          width: "100%",
-          height: "100%",
-          // DESKTOP (Fase 1): al entrar en pantalla completa, el elemento que
-          // la toma es el WRAPPER (ver nota del parámetro arriba), no el
-          // <canvas> solo.
-          fullscreenTarget: fullscreenTarget ?? parent,
-        },
-    render: { antialias: true, roundPixels: true },
-    scene: [BootScene, PreloadScene, SlotScene],
-    callbacks: {
-      preBoot: (game) => {
-        game.registry.set("runtime", runtime);
-        game.registry.set("isMobile", isMobile);
-      },
+    scale: {
+      mode: Phaser.Scale.FIT,
+      autoCenter: Phaser.Scale.CENTER_BOTH,
+      width,
+      height,
+      autoRound: true,
+      fullscreenTarget: fullscreenTarget ?? parent,
     },
+    render: {
+      antialias: true, // los símbolos/arte se escalan: filtrado lineal necesario
+      roundPixels: true,
+      powerPreference: "high-performance",
+      // Sin postFX/preFX en escritorio: no hace falta el pipeline de FX "pesado".
+      // autoMobilePipeline solo aplica en iOS/Android (este camino es no táctil).
+      autoMobilePipeline: true,
+    },
+    fps: { target: 60, smoothStep: true },
+    // Sin física (no se carga Arcade/Matter: no hay `physics` en la config) ni gamepad.
+    input: { gamepad: false, touch: true, mouse: true, keyboard: true },
+    disableContextMenu: true,
+    banner: false,
+    scene: [BootScene, PreloadScene, SlotScene],
+    callbacks,
   };
 }

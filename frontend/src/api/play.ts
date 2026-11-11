@@ -1,4 +1,4 @@
-import { apiFetch } from "./client";
+import { apiFetch, SPIN_TIMEOUT_MS } from "./client";
 import type { SpinResponse } from "./spinApi";
 
 export interface ThemeSymbol {
@@ -34,6 +34,12 @@ export interface ThemeAssets {
   reel_effect: string | null;
   grid_frame: string | null;
   home_button: string | null;
+  // Opcionales (aún no los envía el backend): fondo HORIZONTAL optimizado para
+  // escritorio y personajes decorativos a los lados del marco. Si faltan, el
+  // juego usa `background` y no dibuja personajes.
+  background_desktop?: string | null;
+  character_left?: string | null;
+  character_right?: string | null;
 }
 
 export interface Theme {
@@ -110,4 +116,5 @@ export const playSpin = (token: string, gameSession: string, betAmount: number) 
     method: "POST",
     body: { game_session: gameSession, bet_amount: betAmount },
     token,
+    timeoutMs: SPIN_TIMEOUT_MS,
   });

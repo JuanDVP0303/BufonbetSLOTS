@@ -24,10 +24,16 @@ export class PreloadScene extends Phaser.Scene {
     // Chrome del casino (fondo, logo, banner de premio, botón de girar, música).
     const a = runtime.theme?.assets;
     if (a) {
-      // Los GIF NO se cargan en Phaser (los animaría estáticos): se pintan como <img>
-      // HTML detrás del canvas. Solo las imágenes ESTÁTICAS van como textura de Phaser.
-      const isGifBg = !!a.background && a.background.toLowerCase().endsWith(".gif");
-      if (a.background && !isGifBg) this.load.image(TEX.bg, a.background);
+      // FONDO: en táctil NO se carga como textura (lo pinta la capa DOM "cover"
+      // detrás del canvas transparente; antes se decodificaba y subía a la GPU sin
+      // dibujarse nunca). En escritorio sí: se dibuja dentro de Phaser (canvas
+      // OPACO, ver config.ts), con el fondo horizontal optimizado si el tema lo trae.
+      // Los GIF/video siguen siendo DOM.
+      const bgUrl = a.background_desktop || a.background;
+      const isGifBg = !!bgUrl && bgUrl.toLowerCase().endsWith(".gif");
+      if (!this.registry.get("isTouchDevice") && bgUrl && !isGifBg && runtime.theme?.background_type !== "VIDEO") {
+        this.load.image(TEX.bg, bgUrl);
+      }
       // En móvil, BootScene ya pudo haber cargado el logo (pantalla de carga,
       // Fase 6) — evita pedirlo dos veces.
       if (a.logo && !this.textures.exists(TEX.logo)) this.load.image(TEX.logo, a.logo);
@@ -60,6 +66,11 @@ export class PreloadScene extends Phaser.Scene {
       // Marco ilustrado de la rejilla: siempre estático (si se sube un GIF, se usa
       // su primer cuadro, igual que el resto de banners decorativos del tema).
       if (a.grid_frame) this.load.image(TEX.gridFrame, a.grid_frame);
+      // Personajes decorativos (opcionales, solo se dibujan en horizontal).
+      if (!this.registry.get("isTouchDevice")) {
+        if (a.character_left) this.load.image(TEX.characterLeft, a.character_left);
+        if (a.character_right) this.load.image(TEX.characterRight, a.character_right);
+      }
     }
 
     // Si un asset falla (404), Phaser sigue y se usa el placeholder.

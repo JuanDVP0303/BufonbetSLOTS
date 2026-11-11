@@ -95,4 +95,8 @@ export const TEX = {
   // Totalmente transparente (nada dibujado): zona táctil invisible para
   // botones del HUD móvil (Fase 3) dibujados con Graphics en vez de imagen.
   transparentPixel: "tex-transparent-px",
+  // Personajes decorativos a los lados del marco (solo horizontal y si el tema
+  // trae la imagen — ver CONFIG_DESKTOP.characters).
+  characterLeft: "tex-character-left",
+  characterRight: "tex-character-right",
 } as const;

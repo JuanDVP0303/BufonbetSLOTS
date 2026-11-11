@@ -123,6 +123,11 @@ export default function SlotGameCanvas({
       )
     );
     gameRef.current = game;
+    // Solo en desarrollo (Vite lo elimina del build de producción): expone la
+    // instancia para inspeccionar la escena desde DevTools / scripts de QA.
+    if (import.meta.env.DEV) {
+      (window as unknown as { __SLOT_GAME__?: Phaser.Game }).__SLOT_GAME__ = game;
+    }
 
     // CORRECCIÓN D1 (punto 6, SOLO ESCRITORIO): el padre dibuja el botón de
     // pantalla completa en su propio header DOM (junto a atrás/salir, mismo
@@ -166,6 +171,20 @@ export default function SlotGameCanvas({
     v.play().catch(() => {});
   }, [videoUrl]);
 
+  // SOLO ESCRITORIO: con la pestaña oculta, el video de fondo se pausa (Phaser ya
+  // pausa su propio loop; esto evita seguir decodificando video en segundo plano).
+  useEffect(() => {
+    if (isMobile || !videoUrl) return;
+    const onVis = () => {
+      const v = videoRef.current;
+      if (!v) return;
+      if (document.hidden) v.pause();
+      else v.play().catch(() => {});
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [isMobile, videoUrl]);
+
   // SOLO MÓVIL: el canvas de Phaser usa Scale.FIT a resolución fija (ver
   // game/config.ts), así que deja franjas vacías alrededor cuando la pantalla
   // real no tiene exactamente la proporción de diseño. Para que esas franjas
@@ -191,7 +210,7 @@ export default function SlotGameCanvas({
       : null;
 
   return (
-    <div className="slot-canvas-wrap" ref={wrapRef}>
+    <div className={"slot-canvas-wrap" + (isMobile ? "" : " slot-canvas-wrap-desktop")} ref={wrapRef}>
       {landscapeWarning && (
         <div className="rotate-overlay" role="alert">
           <div className="rotate-card">

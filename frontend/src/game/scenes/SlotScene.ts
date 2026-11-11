@@ -7,7 +7,18 @@ import type { SpinResponse } from "../../api/spinApi";
 import type { RuntimeConfig } from "../config";
 import type { MascotFrames } from "../gifMascot";
 import { CONFIG_MOBILE, MOBILE_FONT, designScaleFactor } from "../mobile/configMobile";
-import { CONFIG_DESKTOP } from "../desktop/configDesktop";
+import { CONFIG_DESKTOP, DESKTOP_FONT } from "../desktop/configDesktop";
+import {
+  chooseLayoutMode,
+  computeDesktopLayout,
+  desktopDesignSize,
+  desktopRenderScale,
+  portraitDesignSize,
+  type DesktopLayout,
+  type LayoutMode,
+} from "../desktop/layoutDesktop";
+import { DesktopHud, removeTweensOf, type TextLike } from "../desktop/DesktopHud";
+import { bakeSymbolTexture, ensureDigitFont, ensureRaysTexture, ensureVignetteTexture } from "../desktop/assetsDesktop";
 
 /** Botón redondo con estado activo/inactivo (turbo, autoplay). */
 interface Toggle {
@@ -27,10 +38,10 @@ function hexToNum(hex: string | undefined, fallback: number): number {
 }
 
 /**
- * Escena principal del slot. RESPONSIVE: no asume un tamaño fijo — lee
- * `this.scale` (tamaño real del lienzo) y centra la rejilla, dejando que el
- * fondo del casino llene toda la pantalla (en PC se ve completo, no como un
- * teléfono). Al redimensionar la ventana se reinicia la escena para recalcular.
+ * Escena principal del slot. Dos diseños, elegidos por computeLayout(width, height):
+ *  - "portrait": el diseño móvil (CONFIG_MOBILE), intacto.
+ *  - "landscape": escritorio/horizontal (CONFIG_DESKTOP + desktop/layoutDesktop.ts).
+ * En horizontal, el resize (con debounce) solo reposiciona: no recrea la escena.
  */
 export class SlotScene extends Phaser.Scene {
   private runtime!: RuntimeConfig;
@@ -52,24 +63,34 @@ export class SlotScene extends Phaser.Scene {
   private gridW = 450;
   private gridH = 450;
   private panelPad = 20; // margen entre la rejilla y el borde de caramelo
-  private portrait = false; // móvil (vertical) vs escritorio (horizontal)
-  private isMobile = false; // dispositivo táctil real (ver CONFIG_MOBILE) — aísla la Fase 1 de escritorio
-  // DESKTOP (Fase 1): "zona segura" del contenido — nunca más ancha que
-  // `H * CONFIG_DESKTOP.safeZone.maxAspect`, centrada dentro de `this.W` real.
-  // En monitores ultra anchos el contenido queda acotado y centrado; el fondo
-  // (aparte, drawBackground) sí usa todo `this.W`. Ver computeLayoutDesktop().
-  private contentX = 0;
-  private contentW = 1920;
-  // FASE 2 DESKTOP (punto 1): parallax leve del fondo con el mouse — posición
-  // BASE (centro de pantalla) + un offset que se acerca suavemente (lerp, en
-  // update()) al que marca el puntero. Separar base/offset evita que dos
-  // tweens se peleen por la misma propiedad (el mismo bug que hubo que
-  // arreglar en el fade de changeBet() en móvil, Fase 7 auditoría).
-  private bgImageDesktop?: Phaser.GameObjects.Image;
-  private bgBaseX = 0;
-  private bgBaseY = 0;
-  private bgParallaxTargetX = 0;
-  private bgParallaxTargetY = 0;
+  private portrait = false; // alto de diseño > ancho de diseño
+  // true = diseño VERTICAL/móvil (CONFIG_MOBILE). Lo decide el modo de layout
+  // (ver computeLayout): siempre en táctil, y en ventanas verticales de PC.
+  private isMobile = false;
+  // ---- Sistema de layout por orientación (ver computeLayout) ----------------
+  private layoutMode: LayoutMode = "portrait";
+  private isTouchDevice = false; // clase de DISPOSITIVO (no cambia en la sesión)
+  private L?: DesktopLayout; // geometría horizontal vigente
+  private renderScale = 1; // resolución interna / diseño (zoom de cámara), solo horizontal
+  private hud?: DesktopHud;
+  private reelsRoot?: Phaser.GameObjects.Container;
+  private reelsMask?: Phaser.GameObjects.Graphics;
+  private gridFrameImg?: Phaser.GameObjects.Image;
+  private framePanel?: Phaser.GameObjects.Graphics;
+  private logoCont?: Phaser.GameObjects.Container;
+  private logoImg?: Phaser.GameObjects.Image | Phaser.GameObjects.Text;
+  private logoSheen?: Phaser.GameObjects.Image;
+  private charImgs: { left?: Phaser.GameObjects.Image; right?: Phaser.GameObjects.Image } = {};
+  private resizeTimer?: number;
+  private pendingRelayout = false;
+  private coinFx?: Phaser.GameObjects.Particles.ParticleEmitter;
+  private confettiFx?: Phaser.GameObjects.Particles.ParticleEmitter;
+  private musicPausedByHide = false;
+  private fsBadgeW = 0;
+  // Fondo dentro del canvas (solo escritorio, canvas opaco): ver buildCanvasBackground.
+  private bgGradient?: Phaser.GameObjects.Graphics;
+  private bgImg?: Phaser.GameObjects.Image;
+  private bgShade?: Phaser.GameObjects.Image;
   private logoY = 70;
   private logoX = 270; // posición horizontal del logo (centro en móvil, esquina en PC)
   private logoAngle = 0; // inclinación del logo (para seguir el borde en la esquina)
@@ -85,15 +106,13 @@ export class SlotScene extends Phaser.Scene {
   // modos queda sin usar.
   private celebrationY = 300;
   private winMaxW = 400; // ancho máximo del texto "GANASTE" (para que no se desborde)
-  private winPanelH = 70; // alto del panel redondeado de GANANCIA (móvil, adosado a la rejilla)
   private prizeBannerImg?: Phaser.GameObjects.Image; // banner de premio (solo visible al ganar)
   private bannerY = 700;
-  private buttonY = 850;
   private barTop = 800;
   private footerH = 160; // alto real del footer (puede diferir de `H - barTop` si hay margen debajo)
 
   private winGfx!: Phaser.GameObjects.Graphics;
-  private winText!: Phaser.GameObjects.Text;
+  private winText?: Phaser.GameObjects.Text; // solo diseño móvil (horizontal usa el banner del HUD)
   private button!: Phaser.GameObjects.Image;
   private buttonLabel!: Phaser.GameObjects.Text;
   private pulse?: Phaser.Tweens.Tween;
@@ -114,20 +133,20 @@ export class SlotScene extends Phaser.Scene {
   private betMin = 1;
   private betMax = 1_000_000;
   private balance = 0;
-  private currency = "USD";
   private curSymbol = "$";
   private curExp = 2;
   private accent = 0xffd23f; // color predominante del tema (numérico, para gráficos)
   private accentHex = "#ffd23f"; // mismo color en texto (para estilos de Text)
-  private balanceValue!: Phaser.GameObjects.Text;
-  private betValue!: Phaser.GameObjects.Text;
+  // Montos: Phaser.Text en móvil; BitmapText (vía adaptador) en horizontal.
+  private balanceValue!: TextLike;
+  private betValue!: TextLike;
   // REORGANIZACIÓN móvil: la APUESTA ahora se muestra DOS veces (pastilla
   // interactiva con −/+ + eco de solo lectura en la fila de estadísticas del
   // fondo, como en la referencia) — `betValueEcho` es ese segundo texto,
   // actualizado junto con `betValue` en changeBet(). `undefined` en
   // cualquier otro modo (nunca se asigna ahí), así que el `?.` es inerte.
   private betValueEcho?: Phaser.GameObjects.Text;
-  private winValue!: Phaser.GameObjects.Text;
+  private winValue!: TextLike;
   private winGroup!: Phaser.GameObjects.Container; // GANANCIA (se oculta al mostrar el banner)
   private legalText?: Phaser.GameObjects.Text; // SOLO MÓVIL: línea diminuta con el ID de la última ronda
   // SOLO MÓVIL (Corrección 4, punto 0): pastillas de CRÉDITO/APUESTA (antes
@@ -137,12 +156,6 @@ export class SlotScene extends Phaser.Scene {
   // CORRECCIÓN 1: bounding boxes del HUD móvil para el modo debug (ver
   // CONFIG_MOBILE.debug.enabled, debugRegisterBox, debugCheckOverlaps).
   private debugBoxes: { name: string; x: number; y: number; w: number; h: number }[] = [];
-  // DIAGNÓSTICO D1b (temporal, SOLO escritorio): referencias con nombre a los
-  // GameObjects reales del HUD de escritorio, para poder volcarlos por
-  // consola (ver debugTrack/debugDumpObjects) — independiente de los
-  // bounding boxes de debugBoxes (esos son solo rectángulos AABB para
-  // detectar solapes, no objetos reales con depth/alpha/textura).
-  private debugObjects: { name: string; obj: Phaser.GameObjects.GameObject }[] = [];
   // SOLO MÓVIL: disco del botón de girar (para atenuarlo al deshabilitar) — Graphics
   // genérico, o la imagen de spin_button cuando el tema la subió (ver buildControlsMobile).
   private spinChip?: Phaser.GameObjects.Graphics | Phaser.GameObjects.Image;
@@ -191,18 +204,9 @@ export class SlotScene extends Phaser.Scene {
 
   // Música de fondo del casino (opcional) y su botón de encendido/apagado.
   private music?: Phaser.Sound.BaseSound;
-  private musicBtn?: Phaser.GameObjects.Image;
   private musicToggleMobile?: Toggle; // SOLO MÓVIL: ícono de SONIDO dibujado por código (ver CORRECCIÓN 1)
-  private musicToggleDesktop?: Toggle; // FASE 3 DESKTOP: idem, ícono de SONIDO siempre dibujado por código
-  // CORRECCIÓN D2 (punto 3, SOLO ESCRITORIO): texto de ayuda de turbo — se
-  // desvanece solo tras la primera tirada (ver onSpin()). `undefined` en
-  // móvil siempre (nunca se asigna ahí), así que el chequeo en onSpin() es
-  // inerte para ese modo.
-  private turboHintText?: Phaser.GameObjects.Text;
+  private musicToggleDesktop?: Toggle; // horizontal: botón SONIDO de la barra
   private musicMuted = false;
-  private musicX = 0;
-  private musicY = 0;
-  private musicR = 24;
 
   constructor() {
     super("Slot");
@@ -210,7 +214,49 @@ export class SlotScene extends Phaser.Scene {
 
   create() {
     this.runtime = this.registry.get("runtime") as RuntimeConfig;
-    this.isMobile = (this.registry.get("isMobile") as boolean) ?? false;
+    // Modo de layout: config.ts lo deja en el registry al arrancar y
+    // switchLayoutMode() lo actualiza si una ventana de PC cruza vertical/horizontal.
+    const regMobile = (this.registry.get("isMobile") as boolean) ?? false;
+    this.isTouchDevice = (this.registry.get("isTouchDevice") as boolean | undefined) ?? regMobile;
+    this.layoutMode = (this.registry.get("layoutMode") as LayoutMode | undefined) ?? (regMobile ? "portrait" : "landscape");
+    this.isMobile = this.layoutMode === "portrait";
+    // Phaser REUTILIZA la instancia en scene.restart(): referencias del modo
+    // horizontal a objetos ya destruidos se limpian acá.
+    this.L = undefined;
+    this.hud = undefined;
+    this.reelsRoot = undefined;
+    this.reelsMask = undefined;
+    this.gridFrameImg = undefined;
+    this.framePanel = undefined;
+    this.logoCont = undefined;
+    this.logoImg = undefined;
+    this.logoSheen = undefined;
+    this.charImgs = {};
+    this.bgGradient = undefined;
+    this.bgImg = undefined;
+    this.bgShade = undefined;
+    this.coinFx = undefined;
+    this.confettiFx = undefined;
+    this.pendingRelayout = false;
+    this.fsBadge = undefined;
+    this.fsBadgeText = undefined;
+    this.transient = [];
+    this.winPulseStops = [];
+    this.winOverlayActive = false;
+    this.winText = undefined;
+    this.prizeBannerImg = undefined;
+    this.turboToggle = undefined;
+    this.autoToggle = undefined;
+    this.musicToggleMobile = undefined;
+    this.musicToggleDesktop = undefined;
+    this.creditPill = undefined;
+    this.betPill = undefined;
+    this.betValueEcho = undefined;
+    this.legalText = undefined;
+    this.spinChip = undefined;
+    this.spinningIndicatorTween = undefined;
+    this.pulse = undefined;
+    this.spinIdlePulse = undefined;
     this.cols = this.runtime.grid?.cols ?? 3;
     this.rows = this.runtime.grid?.rows ?? 3;
     this.paylines = this.runtime.theme?.paylines?.length ? this.runtime.theme.paylines : PAYLINES;
@@ -237,7 +283,6 @@ export class SlotScene extends Phaser.Scene {
     this.betMax = this.runtime.betMax ?? 1_000_000;
     this.bet = (this.registry.get("bet") as number) ?? this.runtime.betAmount;
     this.balance = (this.registry.get("balance") as number) ?? this.runtime.balance ?? 0;
-    this.currency = this.runtime.currency ?? "USD";
     this.curSymbol = this.runtime.currencySymbol ?? "$";
     this.curExp = this.runtime.currencyExponent ?? 2;
     this.accent = hexToNum(this.runtime.theme?.accent_color, 0xffd23f);
@@ -265,64 +310,56 @@ export class SlotScene extends Phaser.Scene {
       if (frames) this.mascotFrames = frames;
     });
 
-    this.computeLayout();
-    this.drawBackground();
-    this.drawPanel();
-    // Fase 3: en móvil real la GANANCIA es solo texto (sin caja), así que no se
-    // dibuja la cápsula. El fallback de ventana angosta no táctil (desktop) la
-    // conserva, sin cambios.
-    if (this.portrait && !this.isMobile) this.drawWinPanel();
-    // FASE 2 DESKTOP (punto 2): personajes decorativos en los márgenes
-    // laterales, DETRÁS del marco (depth bajo) — ver drawDesktopDecorCharacters().
-    if (!this.isMobile && !this.portrait) this.drawDesktopDecorCharacters();
-    this.buildReels();
+    if (this.isMobile) {
+      // ===== VERTICAL / MÓVIL: exactamente la misma secuencia de siempre. =====
+      this.computeLayout(this.scale.width, this.scale.height);
+      // Ventana VERTICAL de PC: el canvas es opaco → el fondo va dentro (en táctil
+      // no: ahí lo pinta la capa DOM, como siempre).
+      if (!this.isTouchDevice) {
+        this.buildCanvasBackground(0.55);
+        this.layoutCanvasBackground();
+      }
+      this.drawBackground();
+      this.drawPanel();
+      this.buildReels();
 
-    this.winGfx = this.add.graphics().setDepth(5);
-    this.drawTitle();
-    this.drawBanner();
+      this.winGfx = this.add.graphics().setDepth(5);
+      this.drawTitle();
+      this.drawBanner();
 
-    // CORRECCIÓN 3 (punto 5, SOLO MÓVIL): el roll-up "GANASTE $x" vivía en
-    // Arial aunque el resto del HUD móvil ya usa la tipografía cartoon —
-    // único texto que se había quedado afuera. Escritorio sigue en Arial.
-    this.winText = this.add
-      .text(this.W / 2, this.bannerY, "", {
-        fontFamily: this.isMobile ? MOBILE_FONT : "Arial, sans-serif",
-        fontSize: `${Math.round(this.size * (this.portrait ? 0.22 : 0.16))}px`,
-        fontStyle: "bold",
-        color: "#ffffff",
-        stroke: "#000000",
-        strokeThickness: 7,
-        align: "center",
-      })
-      .setOrigin(0.5)
-      .setShadow(0, 0, this.accentHex, 14, true, true)
-      .setDepth(6);
+      // CORRECCIÓN 3 (punto 5, SOLO MÓVIL): el roll-up "GANASTE $x" en la
+      // tipografía cartoon del resto del HUD móvil.
+      this.winText = this.add
+        .text(this.W / 2, this.bannerY, "", {
+          fontFamily: MOBILE_FONT,
+          fontSize: `${Math.round(this.size * (this.portrait ? 0.22 : 0.16))}px`,
+          fontStyle: "bold",
+          color: "#ffffff",
+          stroke: "#000000",
+          strokeThickness: 7,
+          align: "center",
+        })
+        .setOrigin(0.5)
+        .setShadow(0, 0, this.accentHex, 14, true, true)
+        .setDepth(6);
 
-    // Fase 3 móvil: HUD propio y aislado (buildControlsMobile). FASE 3
-    // DESKTOP: idem para escritorio real (buildControlsDesktop, nuevo) — el
-    // fallback de ventana angosta no táctil sigue con buildControls() tal
-    // cual estaba (ya no se llama para escritorio real, así que sus ramas
-    // `!P` quedan sin usar ahí, pero no se tocaron para no arriesgar el
-    // único camino que SÍ sigue vivo, el del fallback).
-    if (this.isMobile) this.buildControlsMobile();
-    else if (this.portrait) this.buildControls();
-    else this.buildControlsDesktop();
-    // Fase 1 desktop: botón de pantalla completa + tecla F + debug de zonas.
-    // Solo para escritorio real (no el fallback de ventana angosta no táctil,
-    // que sigue siendo una ventana normal de navegador, no un "juego a pantalla
-    // completa") — ver buildDesktopExtras().
-    if (!this.isMobile && !this.portrait) this.buildDesktopExtras();
+      this.buildControlsMobile();
+    } else {
+      // ===== HORIZONTAL / ESCRITORIO =====
+      this.createDesktop();
+    }
     this.setupMusic();
     this.resetIdleTimer();
 
-    this.input.keyboard?.on("keydown-SPACE", () => this.onSpin());
+    this.input.keyboard?.on("keydown-SPACE", () => {
+      this.hud?.pressSpin();
+      this.onSpin();
+    });
 
-    // FASE 4 DESKTOP (punto 2): atajos de teclado adicionales — mantener
-    // ESPACIO activa turbo (← → cambian la apuesta, M silencia; F ya existe,
-    // ver buildDesktopExtras). Atados aparte del listener de arriba (Phaser
-    // permite varios por evento) para no tocar el spin básico, que sí es
-    // compartido con móvil/fallback.
-    if (!this.isMobile) {
+    // Atajos de teclado (solo dispositivos con teclado, en ambos diseños):
+    // mantener ESPACIO = tirada turbo, ← → cambian la apuesta, M silencia, F
+    // pantalla completa (F11 es nativo del navegador; igual dispara un resize).
+    if (!this.isTouchDevice) {
       this.input.keyboard?.on("keydown-SPACE", (e: KeyboardEvent) => {
         if (e.repeat) return; // el auto-repeat del navegador no debe reiniciar el temporizador de hold
         this.spaceHoldTimer?.remove(false);
@@ -345,48 +382,36 @@ export class SlotScene extends Phaser.Scene {
       this.input.keyboard?.on("keydown-LEFT", () => this.changeBet(-1));
       this.input.keyboard?.on("keydown-RIGHT", () => this.changeBet(1));
       this.input.keyboard?.on("keydown-M", () => this.toggleMusic());
+      if (CONFIG_DESKTOP.fullscreen.enabled) {
+        this.input.keyboard?.on(`keydown-${CONFIG_DESKTOP.fullscreen.keyCode}`, () => this.scale.toggleFullscreen());
+      }
+      // Pestaña oculta: Phaser ya pausa su loop; además música y AudioContext.
+      this.game.events.on(Phaser.Core.Events.HIDDEN, this.onHidden, this);
+      this.game.events.on(Phaser.Core.Events.VISIBLE, this.onVisible, this);
     }
 
     // Recalcular al redimensionar la ventana (solo si no está girando).
     this.scale.on("resize", this.onResize, this);
     this.events.once("shutdown", () => {
       this.scale.off("resize", this.onResize, this);
+      this.game.events.off(Phaser.Core.Events.HIDDEN, this.onHidden, this);
+      this.game.events.off(Phaser.Core.Events.VISIBLE, this.onVisible, this);
+      window.clearTimeout(this.resizeTimer);
       this.music?.stop();
       this.idleTimer?.remove(false);
       this.winCycleTimer?.remove(false);
       this.mascotFrameTimer?.remove(false);
+      this.autoTimer?.remove(false);
+      this.spaceHoldTimer?.remove(false);
     });
   }
 
-  private onResize(size: Phaser.Structs.Size) {
-    if (this.busy) return;
-    // NOTA (CORRECCIÓN 7): `size` es `this.scale.gameSize` — la resolución de
-    // DISEÑO, no el tamaño real. En móvil (Scale.FIT) esa resolución se fija
-    // una sola vez al crear el juego (ver `mobileDesignHeight` en config.ts,
-    // calculada para igualar la proporción real del contenedor y así evitar
-    // el letterboxeo) y NO se vuelve a recalcular sola en cada resize — por
-    // eso esta comparación nunca dispara un restart en móvil hoy. Si el
-    // contenedor cambia de PROPORCIÓN de verdad a mitad de sesión (rotación,
-    // barra de direcciones del navegador, teclado en pantalla), haría falta
-    // además llamar a `this.scale.setGameSize(...)` con la proporción nueva
-    // antes de este chequeo — no implementado todavía porque no se ha
-    // reportado como problema (el aviso de "gira tu teléfono" ya tapa el caso
-    // más común, la rotación a horizontal).
-    if (Math.abs(size.width - this.W) < 2 && Math.abs(size.height - this.H) < 2) return;
-    this.scene.restart();
-  }
 
   update(_time: number, dtMs: number) {
+    // render() no hace nada si el carrete no se movió (ver Reel.render).
     for (const reel of this.reels) {
       reel.update(dtMs);
       reel.render();
-    }
-    // FASE 2 DESKTOP (punto 1): acerca el fondo a su objetivo de parallax un
-    // poco en cada frame (lerp) — nunca de golpe, para que se sienta suave.
-    if (this.bgImageDesktop) {
-      const t = Math.min(1, dtMs / 220);
-      this.bgImageDesktop.x = Phaser.Math.Linear(this.bgImageDesktop.x, this.bgBaseX + this.bgParallaxTargetX, t);
-      this.bgImageDesktop.y = Phaser.Math.Linear(this.bgImageDesktop.y, this.bgBaseY + this.bgParallaxTargetY, t);
     }
   }
 
@@ -563,414 +588,416 @@ export class SlotScene extends Phaser.Scene {
     this.game.events.emit("mobile-top-icon-y", topIconYFrac);
   }
 
-  private computeLayout() {
-    const W = this.scale.width;
-    const H = this.scale.height;
-    this.W = W;
-    this.H = H;
-    this.portrait = H > W;
+  // ====================================================================== //
+  // SISTEMA DE LAYOUT POR ORIENTACIÓN                                       //
+  // computeLayout(width, height) decide el modo y fija TODA la geometría:   //
+  //  - "portrait": diseño móvil de siempre (computeLayoutMobile, intacto).  //
+  //  - "landscape": diseño horizontal (desktop/layoutDesktop.ts, con todos  //
+  //    sus números en CONFIG_DESKTOP).                                      //
+  // Se llama en create() y en cada resize (debounce, ver onResize); en      //
+  // horizontal el resize SOLO reposiciona (applyDesktopLayout), no recrea.  //
+  // ====================================================================== //
+  private computeLayout(width: number, height: number) {
+    this.W = width;
+    this.H = height;
+    this.portrait = height > width;
 
-    // DIAGNÓSTICO (temporal): cuál de las TRES rutas de layout se eligió —
-    // móvil real, el fallback de ventana angosta NO táctil (el HUD viejo,
-    // de antes del rediseño móvil), o escritorio real. Incondicional (no
-    // depende de ningún flag de debug): sirve para confirmar, con una sola
-    // mirada a la consola, si "se ve como antes" es porque `isMobile` salió
-    // `false` (cae al fallback viejo a propósito, por diseño) o es un bug de
-    // verdad en el HUD móvil nuevo.
-    // eslint-disable-next-line no-console
-    console.log("SLOT_LAYOUT_PATH", {
-      path: this.isMobile && this.portrait ? "MOBILE_REAL" : this.portrait ? "FALLBACK_NARROW_NOT_TOUCH" : "DESKTOP_REAL",
-      isMobile: this.isMobile,
-      portrait: this.portrait,
-      W,
-      H,
-    });
-
-    if (this.portrait && this.isMobile) {
-      // MÓVIL REAL (pantalla táctil, Fase 1): geometría dirigida por
-      // CONFIG_MOBILE, aislada del resto — ver computeLayoutMobile(). El
-      // bloque `else if (this.portrait)` de abajo queda intacto como fallback
-      // para una ventana de escritorio angosta (no táctil), que no es "móvil".
+    if (this.isMobile) {
+      // MÓVIL / VERTICAL: idéntico a antes — geometría de CONFIG_MOBILE.
       this.computeLayoutMobile();
-    } else if (this.portrait) {
-      // VENTANA ANGOSTA NO TÁCTIL (fallback, sin cambios): logo arriba
-      // (compacto), rejilla a TODO el ancho y lo más grande posible, controles
-      // apilados debajo (giro centrado + crédito/apuesta + fila de iconos).
-      const headerH = Math.max(76, H * 0.095);
-      const footerMin = 130; // piso del panel de botones, nunca más chico que esto
-      const maxGridW = W * 0.98;
-      // La rejilla queda PEGADA justo bajo el header (título arriba del todo, debajo
-      // de la franja negra del letterbox). Con pocas columnas el ANCHO manda sobre
-      // el alto, así que `size` se calcula contra una cota de alto floja (footerMin):
-      // en la práctica casi siempre gana el ancho, da igual el footer final.
-      const roughGridArea = H - headerH - footerMin;
-      this.size = Math.floor(Math.min(maxGridW / this.cols, roughGridArea / this.rows, 200));
-      this.gridW = this.size * this.cols;
-      this.gridH = this.size * this.rows;
-      this.gridX = (W - this.gridW) / 2;
-      this.gridY = headerH;
-      this.panelPad = Math.round(this.size * 0.12);
-      // Panel de GANANCIA: adosado al borde exterior del panel de la rejilla (mismo
-      // estilo, esquinas inferiores — ver drawPanel/drawWinPanel), no una franja
-      // suelta con hueco.
-      this.winPanelH = Math.round(this.size * 0.44);
-      const winPanelBottom = this.gridY + this.gridH + this.panelPad + this.winPanelH;
-      this.winRowY = this.gridY + this.gridH + this.panelPad + this.winPanelH / 2;
-      // Un margen chico ENTRE el panel de GANANCIA y el footer deja asomar el fondo
-      // del tema ahí (si el footer arranca justo pegado a la rejilla, se ve
-      // demasiado apretado, sin aire). El footer sigue pegado al borde INFERIOR de
-      // la pantalla (eso ya estaba bien) y CRECE hacia arriba para ocupar el resto
-      // del sobrante (nunca baja de footerMin): el sobrante de alto se distribuye
-      // entre sus filas (giro / crédito-apuesta / iconos, ya espaciadas por
-      // fracción de `barH` en buildControls) en vez de quedar como hueco vacío.
-      const midGap = Math.max(14, H * 0.02);
-      const footerH = Math.max(footerMin, H - winPanelBottom - midGap);
-      // MÓVIL: logo/título, compacto, arriba del todo.
-      this.logoY = headerH * 0.52;
-      this.logoX = W / 2;
-      this.logoAngle = 0;
-      this.logoMaxW = W * 0.95;
-      this.logoMaxH = headerH * 1.05;
-      this.barTop = H - footerH;
-      this.footerH = footerH;
-    } else {
-      // ESCRITORIO (horizontal): ver computeLayoutDesktop() — Fase 1 del
-      // rediseño de escritorio (CONFIG_DESKTOP), aislado del resto de esta
-      // función. Deja fijados los mismos campos que antes (gridX/Y/W/H,
-      // panelPad, logoX/Y/MaxW/MaxH/Angle, barTop, footerH, topInfoY), así que
-      // drawTitle/drawPanel/buildControls siguen funcionando sin tocarlos.
-      this.computeLayoutDesktop();
-    }
-    // Celda cuadrada en escritorio y en el fallback de ventana angosta no
-    // táctil (ninguno de los dos pasa por computeLayoutMobile, que es el
-    // único lugar que fija `cellH` distinto de `size` — Corrección 4, punto 3).
-    if (!this.isMobile) this.cellH = this.size;
-
-    this.buttonY = this.barTop + this.footerH * 0.5;
-    // Franja superior donde va la GANANCIA: en escritorio YA la fija
-    // computeLayoutDesktop() (debajo del marco, Fase 1 punto 4) — acá solo se
-    // calcula para los casos portrait, donde en realidad no se usa: `bannerY`
-    // de abajo toma `winRowY` en su lugar para esos dos casos.
-    if (this.isMobile || this.portrait) {
       this.topInfoY = Math.max(28, this.gridY - this.panelPad * 1.1);
+      this.bannerY = this.portrait ? this.celebrationY : this.topInfoY;
+      this.winMaxW = this.portrait ? this.gridW * 0.82 : this.gridW * 0.5;
+      return;
     }
-    // Banner+GANASTE: en PC arriba (zona de GANANCIA); en móvil REAL, pegado
-    // al marco vía `celebrationY` (REORGANIZACIÓN: ya NO es `winRowY` — ese
-    // campo ahora apunta a la pastilla de GANANCIA en el fondo del footer,
-    // un lugar demasiado chico/abajo para la celebración grande); en el
-    // fallback de ventana angosta no táctil, sigue usando `winRowY` como
-    // siempre (esa rama no cambió). Ancho acotado para no desbordar.
-    this.bannerY = this.isMobile && this.portrait ? this.celebrationY : this.portrait ? this.winRowY : this.topInfoY;
-    this.winMaxW = this.portrait ? this.gridW * 0.82 : this.gridW * 0.5;
+
+    const frameAsset = this.textures.exists(TEX.gridFrame)
+      ? (() => {
+          const src = this.textures.get(TEX.gridFrame).getSourceImage();
+          return { width: src.width, height: src.height };
+        })()
+      : null;
+    const L = computeDesktopLayout(width, height, { cols: this.cols, rows: this.rows, frameAsset });
+    this.L = L;
+    this.gridX = L.grid.x;
+    this.gridY = L.grid.y;
+    this.size = L.grid.cellW;
+    this.cellH = L.grid.cellH;
+    this.gridW = L.grid.w;
+    this.gridH = L.grid.h;
+    this.panelPad = L.panelPad;
+    this.logoX = L.logo.cx;
+    this.logoY = L.logo.cy;
+    this.logoMaxW = L.logo.maxW;
+    this.logoMaxH = L.logo.maxH;
+    this.logoAngle = 0;
+    this.barTop = L.bar.rect.y;
+    this.footerH = L.bar.rect.h;
+    this.topInfoY = L.winBanner.cy;
+    this.bannerY = L.winBanner.cy;
+    this.winMaxW = L.winBanner.maxW;
+  }
+
+  // Resize: debounce (CONFIG_DESKTOP.resizeDebounceMs). En táctil, igual que siempre.
+  private onResize(size: Phaser.Structs.Size) {
+    if (this.isTouchDevice) {
+      this.onResizeTouch(size);
+      return;
+    }
+    window.clearTimeout(this.resizeTimer);
+    this.resizeTimer = window.setTimeout(() => this.onDesktopResize(), CONFIG_DESKTOP.resizeDebounceMs);
+  }
+
+  // Dispositivo táctil: el diseño móvil se fija al arrancar (ver config.ts) y no se
+  // recalcula en cada resize (mismo comportamiento de siempre). Única excepción: si
+  // el juego ARRANCÓ con el teléfono en horizontal (tapado por el aviso de "gira tu
+  // teléfono"), al ponerlo vertical se recalcula la resolución de diseño.
+  private onResizeTouch(size: Phaser.Structs.Size) {
+    if (this.busy) return;
+    const pw = this.scale.parentSize.width;
+    const ph = this.scale.parentSize.height;
+    if (this.W > this.H && ph > pw && pw > 0) {
+      this.scale.setGameSize(CONFIG_MOBILE.design.width, Math.round(CONFIG_MOBILE.design.width * (ph / pw)));
+      return; // setGameSize vuelve a emitir "resize" → la comparación de abajo reinicia
+    }
+    if (Math.abs(size.width - this.W) < 2 && Math.abs(size.height - this.H) < 2) return;
+    this.scene.restart();
+  }
+
+  private onDesktopResize() {
+    if (!this.sys.isActive()) return;
+    if (this.busy || this.winOverlayActive) {
+      this.pendingRelayout = true; // se aplica al terminar el giro / la celebración
+      return;
+    }
+    this.pendingRelayout = false;
+    const pw = this.scale.parentSize.width;
+    const ph = this.scale.parentSize.height;
+    if (!pw || !ph) return;
+    const mode = chooseLayoutMode(pw, ph, false);
+    if (mode !== this.layoutMode) {
+      this.switchLayoutMode(mode, pw, ph);
+      return;
+    }
+    if (mode === "portrait") {
+      // Diseño móvil en una ventana VERTICAL de PC: se reconstruye solo si su alto
+      // de diseño cambió de forma apreciable (el diseño móvil no se reposiciona en vivo).
+      const d = portraitDesignSize(pw, ph);
+      if (Math.abs(d.height - this.H) / this.H > 0.06) {
+        this.scale.setGameSize(d.width, d.height);
+        this.scene.restart();
+      }
+      return;
+    }
+    const d = desktopDesignSize(pw, ph);
+    let k = desktopRenderScale(d, pw, ph, window.devicePixelRatio);
+    if (Math.abs(k - this.renderScale) / this.renderScale < CONFIG_DESKTOP.render.minRelativeChange) k = this.renderScale;
+    const bw = Math.round(d.width * k);
+    const bh = Math.round(d.height * k);
+    if (bw !== this.scale.width || bh !== this.scale.height) this.scale.setGameSize(bw, bh);
+    if (k !== this.renderScale) {
+      this.renderScale = k;
+      this.hud?.setTextResolution(k);
+      if (this.logoImg instanceof Phaser.GameObjects.Text) this.crisp(this.logoImg);
+      if (this.fsBadgeText) this.crisp(this.fsBadgeText);
+    }
+    this.registry.set("desktopDesign", d);
+    this.applyCamera(d.width, d.height);
+    if (d.width !== this.W || d.height !== this.H || !this.L) {
+      this.computeLayout(d.width, d.height);
+      this.applyDesktopLayout();
+    }
+  }
+
+  // La ventana cruzó el umbral vertical/horizontal: único caso en que se recrea la
+  // escena (los dos diseños son distintos). Saldo/apuesta/turbo/sonido persisten
+  // vía registry, igual que siempre.
+  private switchLayoutMode(mode: LayoutMode, pw: number, ph: number) {
+    const d = mode === "portrait" ? portraitDesignSize(pw, ph) : desktopDesignSize(pw, ph);
+    const k = mode === "portrait" ? 1 : desktopRenderScale(d, pw, ph, window.devicePixelRatio);
+    this.registry.set("layoutMode", mode);
+    this.registry.set("isMobile", mode === "portrait");
+    if (mode === "landscape") this.registry.set("desktopDesign", d);
+    this.scale.setGameSize(Math.round(d.width * k), Math.round(d.height * k));
+    this.scene.restart();
+  }
+
+  // Zoom de cámara = resolución interna / resolución de diseño: todo se sigue
+  // posicionando en px de DISEÑO; la cámara lo lleva a los píxeles reales.
+  private applyCamera(designW: number, designH: number) {
+    const cam = this.cameras.main;
+    cam.setZoom(this.renderScale);
+    cam.centerOn(designW / 2, designH / 2);
+  }
+
+  /** Text nítido con el zoom actual (no-op en móvil). */
+  private crisp(...texts: Phaser.GameObjects.Text[]) {
+    if (this.isMobile) return;
+    for (const t of texts) if (t.active && t.style.resolution !== this.renderScale) t.setResolution(this.renderScale);
   }
 
   // ====================================================================== //
-  // LAYOUT ESCRITORIO (Fase 1 del rediseño desktop) — módulo aislado: solo  //
-  // se llama cuando !this.isMobile && !this.portrait. Dirigido por         //
-  // CONFIG_DESKTOP, con la misma idea que computeLayoutMobile(): deja       //
-  // fijados los mismos campos que ya consume el resto de la clase          //
-  // (gridX/Y/W/H, panelPad, logoX/Y/MaxW/MaxH/Angle, barTop, footerH,      //
-  // topInfoY), así drawTitle/drawPanel/buildControls siguen funcionando    //
-  // sin tocarlos — Fase 1 es solo estructura, no arte (eso llega en fases   //
-  // siguientes, cuando se reescriban esos métodos para escritorio).        //
-  //                                                                        //
-  // Escritorio usa Scale.RESIZE (ver game/config.ts): `this.W`/`this.H`    //
-  // SON el tamaño REAL de la ventana en todo momento — a diferencia de     //
-  // móvil (Scale.FIT + resolución de diseño), acá NO hace falta ningún     //
-  // truco de conversión "diseño -> real": todo lo que se calcula contra    //
-  // `H`/`W` YA es real, y se recalcula solo en cada resize/fullscreen vía   //
-  // el `this.scale.on("resize", ...)` ya existente (ver onResize), que en  //
-  // modo RESIZE sí dispara en cada cambio real (a diferencia de FIT).      //
+  // CONSTRUCCIÓN DEL MODO HORIZONTAL (una sola vez por escena)              //
   // ====================================================================== //
-  private computeLayoutDesktop() {
-    // DIAGNÓSTICO D1b: identificador único para confirmar en la consola del
-    // navegador que ESTA función (y no otra ruta de código) es la que
-    // construye el layout de escritorio en la pestaña que el usuario tiene
-    // abierta. Incondicional (no depende de CONFIG_DESKTOP.debug.enabled):
-    // debe verse SIEMPRE, una vez por cada creación/reinicio de la escena
-    // (create() -> computeLayout() -> computeLayoutDesktop()). Si no
-    // aparece, o aparece con un `W`/`H` que no coincide con la ventana real,
-    // el problema NO está en este archivo — ver respuesta para más detalle.
-    // eslint-disable-next-line no-console
-    console.log("DESKTOP_LAYOUT_V2", {
-      W: this.W,
-      H: this.H,
-      isMobile: this.isMobile,
-      portrait: this.portrait,
-      ts: Date.now(),
-    });
+  private createDesktop() {
+    const pw = this.scale.parentSize.width || this.scale.width;
+    const ph = this.scale.parentSize.height || this.scale.height;
+    const d = (this.registry.get("desktopDesign") as { width: number; height: number } | undefined) ?? desktopDesignSize(pw, ph);
+    this.renderScale = this.scale.width / d.width;
+    this.applyCamera(d.width, d.height);
+    this.computeLayout(d.width, d.height);
+    this.prepareDesktopAssets();
+
+    const DEPTH = CONFIG_DESKTOP.depth;
+    this.buildCanvasBackground(1);
+    if (this.textures.exists(TEX.gridFrame)) {
+      this.gridFrameImg = this.add.image(0, 0, TEX.gridFrame).setDepth(DEPTH.frame);
+    } else {
+      this.framePanel = this.add.graphics().setDepth(DEPTH.frame);
+    }
+    this.buildReels();
+    this.winGfx = this.add.graphics().setDepth(DEPTH.winLines);
+    this.buildDesktopLogo();
+    for (const side of ["left", "right"] as const) {
+      const key = side === "left" ? TEX.characterLeft : TEX.characterRight;
+      if (this.textures.exists(key)) {
+        this.charImgs[side] = this.add.image(0, 0, key).setOrigin(0.5, 1).setDepth(DEPTH.characters).setVisible(false);
+      }
+    }
+    this.buildDesktopHud();
+    this.buildWinFx();
+    this.applyDesktopLayout();
+    // El HOME del header DOM vuelve a su sitio de escritorio (si veníamos de vertical).
+    this.game.events.emit("mobile-top-icon-y", CONFIG_DESKTOP.headerIconYFrac);
+    // El contenedor pudo cambiar entre el arranque y ahora: una medición inicial.
+    this.onResize(this.scale.gameSize);
+  }
+
+  // Recursos pre-renderizados (se cachean en el juego; sobreviven a reinicios).
+  private prepareDesktopAssets() {
+    const T = CONFIG_DESKTOP.text;
+    ensureDigitFont(this, T.bitmapFontKey, { family: DESKTOP_FONT, weight: "800", bakeSize: T.bakeSize, extraChars: this.curSymbol });
+    ensureRaysTexture(this, SlotScene.RAYS_TEX, CONFIG_DESKTOP.effects.raysTextureSize);
+    // Sombra + contorno de cada símbolo horneados una vez (antes: 2 preFX por sprite y frame).
+    const maxSide = 512;
+    for (const code of this.symbolPool()) bakeSymbolTexture(this, `sym-${code}`, `sym-${code}${SlotScene.BAKED_SUFFIX}`, maxSide);
+  }
+
+  private buildDesktopLogo() {
+    const DL = CONFIG_DESKTOP.logo;
+    this.logoCont = this.add.container(0, 0).setDepth(CONFIG_DESKTOP.depth.logo);
+    const floatTargets: Phaser.GameObjects.GameObject[] = [];
+    if (this.textures.exists(TEX.logo)) {
+      const img = this.add.image(0, 0, TEX.logo);
+      // Destello ocasional: una copia blanca en ADD que aparece/desaparece cada
+      // `sheenEveryMs` (antes: FX "Shine" + sombra por postFX en CADA frame).
+      const sheen = this.add.image(0, 0, TEX.logo).setTintFill(0xffffff).setBlendMode(Phaser.BlendModes.ADD).setAlpha(0);
+      this.logoCont.add([img, sheen]);
+      this.logoImg = img;
+      this.logoSheen = sheen;
+      floatTargets.push(img, sheen);
+      this.time.addEvent({
+        delay: DL.sheenEveryMs,
+        loop: true,
+        callback: () => {
+          if (!this.busy) this.tweens.add({ targets: sheen, alpha: { from: 0, to: 0.2 }, duration: 420, yoyo: true, ease: "Sine.easeInOut" });
+        },
+      });
+    } else {
+      const fontSize = Math.round(Math.min(this.logoMaxW * 0.16, this.logoMaxH * 0.8));
+      const title = this.goldGradientText(0, 0, this.runtime.theme?.title ?? "SLOT", fontSize, "#3d230a", ["#fff6c8", "#ffd23f", "#b5790a"], 10);
+      this.crisp(title);
+      this.logoCont.add(title);
+      this.logoImg = title;
+      floatTargets.push(title);
+    }
+    // Entrada (una vez) + flotación suave (solo transform; muy barata).
+    this.logoCont.setScale(0.6).setAlpha(0);
+    this.tweens.add({ targets: this.logoCont, scale: 1, alpha: 1, duration: 550, ease: "Back.easeOut" });
+    this.tweens.add({ targets: floatTargets, y: -DL.floatPx, duration: 1700, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
+  }
+
+  private buildDesktopHud() {
+    const hud = new DesktopHud(
+      this,
+      {
+        onSpin: () => this.onSpin(),
+        onBet: (dir) => this.changeBet(dir),
+        onAuto: () => this.toggleAuto(),
+        onTurbo: () => this.toggleTurbo(),
+        onMusic: () => this.toggleMusic(),
+        onInfo: () => this.runtime.onShowPaytable?.(),
+      },
+      this.accent
+    );
+    this.hud = hud;
+    hud.setTextResolution(this.renderScale);
+    this.balanceValue = hud.credit.text;
+    this.creditPill = hud.credit;
+    this.betValue = hud.bet.text;
+    this.betPill = hud.bet;
+    this.winValue = hud.win.text;
+    // GANANCIA vive en la barra: no se oculta durante los premios (contenedor vacío
+    // para el código compartido que hace winGroup.setVisible()).
+    this.winGroup = this.add.container(0, 0);
+    this.balanceValue.setText(this.money(this.balance));
+    this.betValue.setText(this.money(this.bet));
+    this.winValue.setText(this.money(0));
+    this.turboToggle = { setActive: (on) => hud.setTurbo(on) };
+    this.autoToggle = { setActive: (on) => hud.setAuto(on) };
+    this.musicToggleDesktop = { setActive: (on) => hud.setMusic(on) };
+    this.turboToggle.setActive(this.turbo);
+    this.autoToggle.setActive(false);
+    this.musicToggleDesktop.setActive(!this.musicMuted);
+  }
+
+  // Emisores de partículas PERSISTENTES (pool interno de Phaser): se reutilizan con
+  // explode() en cada premio grande en vez de crear/destruir emisores.
+  private buildWinFx() {
+    const OV = CONFIG_DESKTOP.depth.overlays;
+    this.coinFx = this.add
+      .particles(0, 0, TEX.coin, {
+        lifespan: 1600,
+        speed: { min: 250, max: 560 },
+        angle: { min: 240, max: 300 },
+        gravityY: 900,
+        scale: { start: 0.9, end: 0.2 },
+        rotate: { min: 0, max: 360 },
+        tint: [this.accent, 0xffe066, 0xffb703],
+        emitting: false,
+      })
+      .setDepth(OV + 5);
+    this.confettiFx = this.add
+      .particles(0, 0, TEX.confetti, {
+        lifespan: 2200,
+        speed: { min: 150, max: 420 },
+        angle: { min: 200, max: 340 },
+        gravityY: 500,
+        scale: { start: 1, end: 0.4 },
+        rotate: { min: 0, max: 360 },
+        tint: [0xef476f, 0x06d6a0, 0x00bbf9, 0x9b5de5, 0xffd23f],
+        emitting: false,
+      })
+      .setDepth(OV + 5);
+  }
+
+  // Fondo dentro del canvas (escritorio): degradado del tema (si aplica) + imagen
+  // "cover" SIN FX + viñeta horneada. Sin blur, sin postFX, sin parallax: tres
+  // quads estáticos. Un fondo GIF/video sigue siendo DOM (canvas transparente).
+  private buildCanvasBackground(shadeAlpha: number) {
+    const DEPTH = CONFIG_DESKTOP.depth;
+    const t = this.runtime.theme;
+    if (t?.background_type === "GRADIENT" && (t.background_gradient || "").includes(",")) {
+      this.bgGradient = this.add.graphics().setDepth(DEPTH.background);
+    }
+    if (this.textures.exists(TEX.bg)) this.bgImg = this.add.image(0, 0, TEX.bg).setDepth(DEPTH.background + 1);
+    ensureVignetteTexture(this, SlotScene.VIGNETTE_TEX);
+    this.bgShade = this.add.image(0, 0, SlotScene.VIGNETTE_TEX).setOrigin(0).setAlpha(shadeAlpha).setDepth(DEPTH.background + 2);
+  }
+
+  private layoutCanvasBackground() {
     const W = this.W;
     const H = this.H;
-    const D = CONFIG_DESKTOP;
-
-    // "Zona segura" (punto 2): el CONTENIDO (logo + rodillos + HUD) nunca es
-    // más ancho que `H * maxAspect` (16:9) — en monitores ultra anchos
-    // (21:9) se queda centrado en una proporción cómoda en vez de estirarse;
-    // el FONDO (aparte, ver drawBackground, que ya cubre contra `W`/`H`
-    // reales) sí se extiende y llena los costados.
-    this.contentW = Math.min(W, H * D.safeZone.maxAspect);
-    this.contentX = (W - this.contentW) / 2;
-
-    const gapMin = Math.max(10, H * D.zones.gapMinPct);
-    const logoZoneH = H * D.zones.logoPct;
-    const controlBarH = H * D.zones.controlBarPct;
-    const G = D.ganancia;
-
-    // Barra de control (punto 4): "ancla al borde real inferior" — en
-    // Scale.RESIZE `H` YA es el alto real, así que esto SIEMPRE llega al
-    // verdadero borde inferior de la ventana, sin importar el resize.
-    this.footerH = controlBarH;
-    this.barTop = H - controlBarH;
-
-    // FASE 2 (punto 2): el marco ya NO usa casi todo el ancho de la zona
-    // segura — deja margen a los lados para los personajes decorativos
-    // (CONFIG_DESKTOP.grid.widthPct, antes 0.92 fijo acá mismo).
-    const maxGridW = this.contentW * D.grid.widthPct;
-    // El marco (punto 4) sobresale `panelPad` más allá de la rejilla en las
-    // CUATRO direcciones — eso hay que reservarlo ANTES de saber `size` (que
-    // es lo que determina `panelPad`), si no el marco podía terminar
-    // pisando el logo arriba o la barra de control abajo en resoluciones
-    // bajas. Se estima con una cota superior (el tamaño que tendría la celda
-    // si el ANCHO fuera el único límite, que siempre es `>=` el tamaño
-    // final) y se reserva esa cota en vez del `panelPad` real — circular de
-    // otro modo.
-    const estPanelPad = Math.round((maxGridW / this.cols) * 0.16);
-    // CORRECCIÓN D2 (punto 3): el alto reservado para GANANCIA ya NO es un %
-    // de `H` desconectado del tamaño real del texto (antes `winBandPct`,
-    // que en 1280x720 reservaba 36px para un bloque de texto de ~61px reales
-    // — dejaba apenas ~3px antes de la barra en vez de los 16 pedidos). Se
-    // calcula con la MISMA fórmula que usará `drawWinInfoDesktop()` —
-    // winInfoMetrics() vive aparte para que las dos SIEMPRE coincidan — pero
-    // con una COTA SUPERIOR de `gridW` (la del ancho, antes de saber si el
-    // alto termina acotando más chico), por la misma razón que `estPanelPad`:
-    // si el texto real sale más chico, sobra margen; nunca al revés.
-    const estMetrics = this.winInfoMetrics(maxGridW);
-    const ganaciaReserved = G.gapAboveFramePx + estMetrics.topOffset + estMetrics.bottomOffset + G.gapBelowToBarPx;
-    const headerH = logoZoneH + gapMin + estPanelPad;
-    const availH = this.barTop - headerH - ganaciaReserved - estPanelPad;
-    this.size = Math.floor(Math.min(maxGridW / this.cols, availH / this.rows, 220));
-    this.gridW = this.size * this.cols;
-    this.gridH = this.size * this.rows;
-    this.gridX = this.contentX + (this.contentW - this.gridW) / 2;
-    this.gridY = headerH + Math.max(0, (availH - this.gridH) / 2);
-    this.panelPad = Math.round(this.size * 0.16); // siempre <= estPanelPad
-
-    // Logo (punto 4): franja superior, CENTRADO sobre los rodillos — antes
-    // iba en la esquina superior-izquierda, inclinado; se deja de usar esa
-    // posición (el reemplazo visual de esa esquina llega en una fase de arte).
-    this.logoX = this.contentX + this.contentW / 2;
-    this.logoY = logoZoneH * 0.52;
-    this.logoAngle = 0;
-    this.logoMaxW = Math.min(this.contentW * 0.4, 420);
-    this.logoMaxH = logoZoneH * 0.85;
-
-    // Franja de GANANCIA (punto 3): el borde SUPERIOR de la etiqueta queda
-    // exactamente `gapAboveFramePx` debajo del marco, y el borde INFERIOR
-    // del monto queda con AL MENOS `gapBelowToBarPx` antes de la barra
-    // (garantizado por la reserva de arriba — nunca menos, puede sobrar si
-    // `size` terminó acotado por ancho en vez de alto). Usa la fórmula REAL
-    // (gridW final, no la cota superior) — ver winInfoMetrics().
-    const frameBottom = this.gridY + this.gridH + this.panelPad;
-    const metrics = this.winInfoMetrics(this.gridW);
-    this.topInfoY = frameBottom + G.gapAboveFramePx + metrics.topOffset;
+    if (this.bgGradient) {
+      const cols = (this.runtime.theme?.background_gradient || "").split(",").map((c) => c.trim()).filter(Boolean);
+      const top = hexToNum(cols[0], 0x101827);
+      const bot = hexToNum(cols[cols.length - 1], 0x05030f);
+      this.bgGradient.clear().fillGradientStyle(top, top, bot, bot, 1).fillRect(0, 0, W, H);
+    }
+    if (this.bgImg) {
+      const src = this.bgImg.texture.getSourceImage();
+      const s = Math.max(W / src.width, H / src.height);
+      // "cover" centrado, con el mismo sesgo vertical que la capa DOM móvil (40%).
+      this.bgImg.setScale(s).setPosition(W / 2, (H - src.height * s) * 0.4 + (src.height * s) / 2);
+    }
+    this.bgShade?.setPosition(0, 0).setDisplaySize(W, H);
   }
 
-  // Tamaños/offsets del texto de GANANCIA, a partir del ancho de la rejilla.
-  // Separado de drawWinInfoDesktop() para que computeLayoutDesktop() pueda
-  // RESERVAR el espacio exacto que ese método va a pintar — si alguna vez se
-  // cambian los tamaños de letra, basta con tocarlos aquí UNA vez.
-  private winInfoMetrics(gridW: number) {
-    const labelSize = Math.max(16, Math.round(gridW * 0.026));
-    const valueSize = Math.max(24, Math.round(gridW * 0.05));
-    return {
-      labelSize,
-      valueSize,
-      topOffset: valueSize * 0.62 + labelSize / 2, // del centro (winY) al borde SUPERIOR de la etiqueta
-      bottomOffset: labelSize * 0.6 + valueSize / 2, // del centro (winY) al borde INFERIOR del monto
-    };
+  /** Reposiciona/reescala TODO el modo horizontal desde `this.L` (sin recrear nada). */
+  private applyDesktopLayout() {
+    const L = this.L;
+    if (!L) return;
+    this.layoutCanvasBackground();
+    if (this.gridFrameImg && L.frameImage) {
+      this.gridFrameImg.setPosition(L.frameImage.cx, L.frameImage.cy).setScale(L.frameImage.scale);
+    }
+    if (this.framePanel) this.drawDesktopPanel(this.framePanel, L);
+    this.reels.forEach((r, c) => r.layout(L.grid.x + c * L.grid.cellW, L.grid.y, L.grid.cellW, L.grid.cellH));
+    this.reelsMask?.clear().fillStyle(0xffffff).fillRect(L.grid.x, L.grid.y, L.grid.w, L.grid.h);
+    // Las rayas de premio se redibujan solas en el siguiente paso del ciclo.
+    this.winGfx.clear();
+
+    if (this.logoCont && this.logoImg) {
+      this.logoCont.setPosition(L.logo.cx, L.logo.cy);
+      if (this.logoImg instanceof Phaser.GameObjects.Image) {
+        const src = this.logoImg.texture.getSourceImage();
+        const s = Math.min(L.logo.maxW / src.width, L.logo.maxH / src.height, 1.25);
+        this.logoImg.setScale(s);
+        this.logoSheen?.setScale(s);
+      }
+    }
+    for (const side of ["left", "right"] as const) {
+      const img = this.charImgs[side];
+      if (!img) continue;
+      const slot = L.characters[side];
+      if (!slot) {
+        img.setVisible(false);
+        continue;
+      }
+      const src = img.texture.getSourceImage();
+      img.setScale(Math.min(slot.w / src.width, slot.h / src.height));
+      img.setPosition(slot.x + slot.w / 2, slot.y + slot.h).setVisible(true);
+    }
+    this.hud?.layout(L);
+    if (this.fsBadge) this.fsBadge.setPosition(L.fsBadge.right - this.fsBadgeW / 2, L.fsBadge.cy);
   }
+
+  // Panel de rodillos por código (temas SIN grid_frame): relleno translúcido + borde
+  // dorado, estático (sin tween infinito sobre Graphics).
+  private drawDesktopPanel(g: Phaser.GameObjects.Graphics, L: DesktopLayout) {
+    const F = CONFIG_DESKTOP.frame;
+    const { x, y, w, h } = L.frameVisible;
+    const r = Math.round(L.grid.cellH * F.cornerRadiusPct);
+    g.clear();
+    for (let i = 3; i >= 1; i--) {
+      g.fillStyle(F.borderColor, 0.05).fillRoundedRect(x - i * 8, y - i * 8, w + i * 16, h + i * 16, r + i * 6);
+    }
+    g.fillGradientStyle(F.fillTop, F.fillTop, F.fillBottom, F.fillBottom, F.fillAlpha).fillRoundedRect(x, y, w, h, r);
+    g.fillStyle(0xffffff, 0.04).fillRoundedRect(x + 5, y + 5, w - 10, h - 10, Math.max(0, r - 3));
+    g.lineStyle(2, F.borderColor, 0.14);
+    for (let c = 1; c < this.cols; c++) {
+      const cx = L.grid.x + c * L.grid.cellW;
+      g.lineBetween(cx, L.grid.y, cx, L.grid.y + L.grid.h);
+    }
+    g.lineStyle(F.borderWidthPx, F.borderColor, 1).strokeRoundedRect(x, y, w, h, r);
+  }
+
+  // Visibilidad de la pestaña: Phaser ya pausa su loop (Game.onHidden); además se
+  // pausa la música y se suspende el AudioContext de los efectos sintetizados.
+  private onHidden() {
+    if (this.music?.isPlaying) {
+      this.music.pause();
+      this.musicPausedByHide = true;
+    }
+    sfx.suspend();
+  }
+
+  private onVisible() {
+    if (this.musicPausedByHide && !this.musicMuted) this.music?.resume();
+    this.musicPausedByHide = false;
+    sfx.resume();
+  }
+
+
+
 
   private drawBackground() {
-    // CORRECCIÓN 1 (punto 3): en móvil el fondo (imagen/degradado/color) y el
-    // oscurecido YA los pinta la capa DOM (.slot-bg-cover/.slot-bg-video en
-    // SlotGameCanvas.tsx — Fase 1) y el oscurecido propio del footer
-    // (buildControlsMobile). Pintar TAMBIÉN una copia dentro de Phaser creaba
-    // el "corte duro": el canvas (Scale.FIT) solo cubre la franja central de
-    // la pantalla, así que esa copia interna terminaba en un recorte/zoom
-    // DISTINTO al de la capa DOM (que cubre el alto completo del dispositivo)
-    // — dos "cover" independientes del mismo recurso casi nunca calzan en el
-    // borde, de ahí la costura y la franja de color distinto debajo. La
-    // solución es que exista UNA sola capa pintando el fondo (la DOM, que sí
-    // cubre el 100% de la pantalla de punta a punta) — el canvas de Phaser es
-    // transparent:true en móvil (ver game/config.ts) y aquí no pinta nada
-    // opaco: la rejilla/HUD flotan directamente sobre la capa DOM. Escritorio
-    // NO tiene esa capa DOM para imagen/degradado estáticos, así que sigue
-    // pintando todo esto dentro de Phaser exactamente como antes.
-    if (!this.isMobile && this.portrait) {
-      // FALLBACK de ventana angosta no táctil: SIN CAMBIOS (lo de siempre).
-      if (this.runtime.theme?.background_type === "GRADIENT") {
-        const cols = (this.runtime.theme?.background_gradient || "")
-          .split(",").map((s) => s.trim()).filter(Boolean);
-        if (cols.length) {
-          const top = hexToNum(cols[0], 0x101827);
-          const bot = hexToNum(cols[cols.length - 1], 0x05030f);
-          const grad = this.add.graphics().setDepth(-11);
-          grad.fillGradientStyle(top, top, bot, bot, 1, 1, 1, 1);
-          grad.fillRect(0, 0, this.W, this.H);
-        }
-      }
-      const isVideoBg =
-        this.runtime.theme?.background_type === "VIDEO" && !!this.runtime.theme?.assets?.background_video;
-      if (isVideoBg) {
-        // nada que pintar: el vídeo se ve por debajo del canvas transparente.
-      } else if (this.textures.exists(TEX.bg)) {
-        const bg = this.add.image(this.W / 2, this.H / 2, TEX.bg).setDepth(-10);
-        const t = bg.texture.getSourceImage();
-        const cover = Math.max(this.W / t.width, this.H / t.height);
-        bg.setScale(cover).setAlpha(1);
-      }
-      const g = this.add.graphics().setDepth(-8);
-      g.fillGradientStyle(0x000000, 0x000000, 0x000000, 0x000000, 0, 0, 0.45, 0.45);
-      g.fillRect(0, this.H * 0.66, this.W, this.H * 0.34);
-    } else if (!this.isMobile && !this.portrait) {
-      // FASE 2 DESKTOP (punto 1): fondo propio, aislado del resto.
-      this.drawBackgroundDesktop();
-    }
-
-    // SOLO MÓVIL (Fase 2): elementos decorativos flotando (placeholder genérico
-    // — sin arte específico de "rosquillas/nubes" todavía, ver mensaje final de
-    // la fase). Chispas/destellos que derivan lento hacia arriba y se desvanecen,
-    // en bucle, por detrás del panel de la rejilla.
+    // El fondo (imagen/degradado/color/GIF/video) lo pinta la capa DOM en AMBOS
+    // modos (SlotGameCanvas.tsx, "cover" a pantalla completa): el canvas es
+    // transparente. Dentro de Phaser solo quedan los destellos ambientales móviles.
     if (this.isMobile) this.buildMobileFloatingFx();
   }
 
-  // ====================================================================== //
-  // FONDO DESKTOP (Fase 2, punto 1) — módulo aislado: solo se llama cuando   //
-  // !isMobile && !portrait. Menos contraste/saturación, desenfoque suave,   //
-  // parallax leve con el mouse (ver update()) y "rosquillas" flotantes      //
-  // (placeholder — sin arte dedicado todavía, ver mensaje final de fase).  //
-  // ====================================================================== //
-  private drawBackgroundDesktop() {
-    const D = CONFIG_DESKTOP.background;
-    const DEPTH = CONFIG_DESKTOP.depth;
-
-    if (this.runtime.theme?.background_type === "GRADIENT") {
-      const cols = (this.runtime.theme?.background_gradient || "")
-        .split(",").map((s) => s.trim()).filter(Boolean);
-      if (cols.length) {
-        const top = hexToNum(cols[0], 0x101827);
-        const bot = hexToNum(cols[cols.length - 1], 0x05030f);
-        const grad = this.add.graphics().setDepth(DEPTH.background);
-        grad.fillGradientStyle(top, top, bot, bot, 1, 1, 1, 1);
-        grad.fillRect(0, 0, this.W, this.H);
-      }
-    }
-    const isVideoBg =
-      this.runtime.theme?.background_type === "VIDEO" && !!this.runtime.theme?.assets?.background_video;
-    if (isVideoBg) {
-      // nada que pintar: el vídeo se ve por debajo del canvas transparente.
-    } else if (this.textures.exists(TEX.bg)) {
-      const bg = this.add.image(this.W / 2, this.H / 2, TEX.bg).setDepth(DEPTH.background);
-      const t = bg.texture.getSourceImage();
-      const cover = Math.max(this.W / t.width, this.H / t.height);
-      // Punto 1: "aligéralo para que no compita con los símbolos" — menos
-      // contraste/saturación (ColorMatrix FX, Phaser 3.60+) + un desenfoque
-      // suave general (Blur FX). Ambos son efectos nuevos de Phaser que no
-      // existían en versiones viejas — si el navegador no soporta WebGL2,
-      // `preFX` devuelve `null` y esto simplemente no se aplica (fallback
-      // silencioso, no rompe nada).
-      bg.preFX?.addColorMatrix().contrast(D.contrast, true).saturate(D.saturation, true);
-      bg.preFX?.addBlur(0, 0.6, 0.6, D.blurStrength, 0xffffff, 3);
-      // Oversize leve (punto 1, "parallax leve"): un poco más grande que el
-      // cover exacto, para tener margen de sobra al desplazarlo con el mouse
-      // sin que se vean bordes — MISMA lección que en móvil (Corrección 5,
-      // punto 9): cuanto más oversize, más se recorta el arte de los bordes,
-      // así que se deja el mínimo necesario para el desplazamiento.
-      bg.setScale(cover * D.oversizeForParallax).setAlpha(1);
-      this.debugTrack("FONDO imagen (TV/rosquillas horneadas en el arte)", bg);
-      this.bgImageDesktop = bg;
-      this.bgBaseX = this.W / 2;
-      this.bgBaseY = this.H / 2;
-      this.bgParallaxTargetX = 0;
-      this.bgParallaxTargetY = 0;
-      // El puntero mueve el fondo en sentido CONTRARIO (como si la cámara se
-      // asomara) — un `pointermove` por frame actualiza solo el OBJETIVO; el
-      // acercamiento real pasa por un lerp en update(), así nunca hay dos
-      // tweens compitiendo por bg.x/bg.y (ver nota del campo arriba).
-      this.input.on("pointermove", (p: Phaser.Input.Pointer) => {
-        const nx = Phaser.Math.Clamp((p.x / this.W - 0.5) * 2, -1, 1);
-        const ny = Phaser.Math.Clamp((p.y / this.H - 0.5) * 2, -1, 1);
-        this.bgParallaxTargetX = -nx * D.parallaxMaxPx;
-        this.bgParallaxTargetY = -ny * D.parallaxMaxPx * 0.6;
-      });
-    }
-    // Viñeta inferior suave para que la barra de control se siga leyendo bien
-    // sobre el fondo ya aclarado.
-    const g = this.add.graphics().setDepth(DEPTH.background + 2);
-    g.fillGradientStyle(0x000000, 0x000000, 0x000000, 0x000000, 0, 0, 0.4, 0.4);
-    g.fillRect(0, this.H * 0.66, this.W, this.H * 0.34);
-    this.debugTrack("FONDO viñeta inferior", g);
-
-    // CORRECCIÓN D1 (punto 4): "que el logo tenga ~30px de aire libre
-    // alrededor" — el fondo real del tema puede traer elementos (TV,
-    // rosquilla) pintados cerca de donde cae el logo; no se puede "mover"
-    // contenido ya horneado en una imagen subida, así que se le pone un
-    // respaldo oscuro sutil detrás (depth bajo, entre la decoración del
-    // fondo y el logo) que despeja esa zona sin importar qué haya en la
-    // imagen. Define también la "zona prohibida" donde NO deben aparecer las
-    // rosquillas de código (más abajo).
-    const logoPadding = 30;
-    const logoBoxX0 = this.logoX - this.logoMaxW / 2 - logoPadding;
-    const logoBoxX1 = this.logoX + this.logoMaxW / 2 + logoPadding;
-    const logoBoxY0 = 0;
-    const logoBoxY1 = this.logoY + this.logoMaxH / 2 + logoPadding;
-    const logoBacking = this.add.graphics().setDepth(DEPTH.characters + 1);
-    logoBacking.fillGradientStyle(0x000000, 0x000000, 0x000000, 0x000000, 0.38, 0.38, 0, 0);
-    logoBacking.fillRect(logoBoxX0, logoBoxY0, logoBoxX1 - logoBoxX0, logoBoxY1 - logoBoxY0);
-    this.debugTrack("FONDO logoBacking (rectángulo oscuro tras el logo)", logoBacking);
-
-    // Punto 1: "rosquillas flotando" — PLACEHOLDER (no hay un asset dedicado
-    // de rosquilla/dona todavía, ver mensaje final de la fase con el tamaño
-    // recomendado): reutiliza el mismo resplandor radial (circular, sin el
-    // defecto de textura cuadrada). CORRECCIÓN D1 (puntos 1 y 4): depth
-    // consolidado en `characters` (antes `background+1`, un valor suelto que
-    // no venía de la jerarquía fija) y NUNCA en la "zona prohibida" del logo
-    // (antes podían caer ahí, chocando con él).
-    const count = D.floatingCount;
-    const maxAttempts = 12;
-    for (let i = 0; i < count; i++) {
-      let startX = 0;
-      let startY = 0;
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        startX = Phaser.Math.Between(0, this.W);
-        startY = Phaser.Math.Between(0, this.barTop);
-        const insideLogoBox = startX >= logoBoxX0 && startX <= logoBoxX1 && startY >= logoBoxY0 && startY <= logoBoxY1;
-        if (!insideLogoBox) break;
-      }
-      const size = Phaser.Math.Between(Math.round(this.H * 0.03), Math.round(this.H * 0.065));
-      const donut = this.add
-        .image(startX, startY, TEX.glow)
-        .setDepth(DEPTH.characters)
-        .setBlendMode(Phaser.BlendModes.ADD)
-        .setAlpha(0)
-        .setDisplaySize(size, size)
-        .setTint(0xffd23f);
-      const drift = Phaser.Math.Between(50, 110);
-      const duration = Phaser.Math.Between(10000, 18000);
-      const delay = Phaser.Math.Between(0, 6000);
-      this.tweens.add({
-        targets: donut,
-        y: startY - drift,
-        x: startX + Phaser.Math.Between(-50, 50),
-        alpha: { from: 0, to: 0.35 },
-        duration: duration / 2,
-        delay,
-        yoyo: true,
-        repeat: -1,
-        ease: "Sine.easeInOut",
-      });
-    }
-  }
 
   // Partículas decorativas ambientales (SOLO móvil): drift lento + fade, en
   // bucle infinito, reutilizando la textura de chispa generada en PreloadScene
@@ -1047,25 +1074,8 @@ export class SlotScene extends Phaser.Scene {
     const py = this.gridY - pad;
     const pw = this.gridW + pad * 2;
     const ph = this.gridH + pad * 2;
-    // En el fallback de ventana angosta no táctil, el panel de GANANCIA se
-    // atornilla justo debajo (drawWinPanel): sus esquinas inferiores quedan
-    // CUADRADAS para que el borde de la rejilla y el de ese panel se junten a
-    // ras, sin el hueco en forma de lente que dejan dos esquinas redondeadas
-    // enfrentadas. En MÓVIL real y en ESCRITORIO real no existe ese panel
-    // pegado debajo (la GANANCIA es solo texto flotante — ver
-    // buildControlsMobile / drawWinInfoDesktop): por eso ahí SÍ se redondean
-    // las cuatro esquinas, como pide el marco "tipo tarjeta" de la referencia.
-    const isNarrowFallback = !this.isMobile && this.portrait;
-    const rBottom = isNarrowFallback ? 0 : r;
-    const radius = { tl: r, tr: r, br: rBottom, bl: rBottom };
+    const radius = { tl: r, tr: r, br: r, bl: r };
 
-    // CORRECCIÓN 5 (punto 4, SOLO MÓVIL): panel en azul/morado profundo
-    // translúcido (antes azul grisáceo) con degradado interior suave entre dos
-    // tonos del mismo color, borde dorado más grueso (5-6px reales) con las
-    // cuatro esquinas redondeadas, y un resplandor dorado sutil PEGADO por
-    // dentro del borde (además del halo exterior que ya existía). Escritorio y
-    // el fallback de ventana angosta no táctil conservan el panel claro de
-    // siempre, sin tocar (rama `else` de abajo).
     if (this.isMobile) {
       const GOLD = 0xffd23f;
       const DEEP_TOP = 0x241c6b; // azul/morado profundo, algo más claro arriba
@@ -1116,195 +1126,10 @@ export class SlotScene extends Phaser.Scene {
       });
       return;
     }
-
-    // FASE 2 DESKTOP (punto 4): mismo lenguaje visual que el panel móvil
-    // (azul/morado profundo + borde dorado + resplandor interior), con los
-    // números propios de CONFIG_DESKTOP.frame. El fallback de ventana angosta
-    // no táctil sigue con el panel claro de siempre (rama final, sin tocar).
-    if (!this.portrait) {
-      this.drawPanelDesktop(px, py, pw, ph, r, radius);
-      return;
-    }
-
-    // FALLBACK de ventana angosta no táctil: SIN CAMBIOS.
-    // Resplandor suave del color de acento (sin oscurecer, estilo caramelo).
-    const glow = this.add.graphics().setDepth(-3);
-    for (let i = 3; i >= 1; i--) {
-      const gr = { tl: r + i * 6, tr: r + i * 6, br: rBottom ? r + i * 6 : 0, bl: rBottom ? r + i * 6 : 0 };
-      glow.fillStyle(this.accent, 0.05);
-      glow.fillRoundedRect(px - i * 8, py - i * 8, pw + i * 16, ph + i * 16, gr);
-    }
-
-    // Panel CLARO translúcido (como Sweet Bonanza): deja ver el fondo por detrás.
-    const panel = this.add.graphics().setDepth(-2);
-    panel.fillStyle(0xffffff, 0.12).fillRoundedRect(px, py, pw, ph, radius);
-    const innerR = { tl: r - 3, tr: r - 3, br: Math.max(0, rBottom - 3), bl: Math.max(0, rBottom - 3) };
-    panel.fillStyle(0xffffff, 0.06).fillRoundedRect(px + 5, py + 5, pw - 10, ph - 10, innerR);
-    // Separadores verticales muy tenues entre rodillos.
-    panel.lineStyle(2, 0xffffff, 0.1);
-    for (let c = 1; c < this.cols; c++) {
-      const x = this.gridX + c * this.size;
-      panel.lineBetween(x, this.gridY, x, this.gridY + this.gridH);
-    }
-
-    // Borde en DEGRADADO continuo entre el acento y blanco (antes era punteado:
-    // línea-espacio-línea; ahora es una sola franja que va fundiendo un color con
-    // el otro alrededor de todo el panel, sin cortes).
-    this.strokeGradientRoundedRect(px, py, pw, ph, radius);
   }
 
-  // ====================================================================== //
-  // MARCO DESKTOP (Fase 2, punto 4) — módulo aislado: solo se llama desde    //
-  // drawPanel() cuando !isMobile && !portrait. Mismo lenguaje visual que el //
-  // panel móvil (azul/morado profundo + borde dorado + resplandor interior),//
-  // con los números propios de CONFIG_DESKTOP.frame (sin factor de escala:  //
-  // Scale.RESIZE ya trabaja en px reales).                                 //
-  // ====================================================================== //
-  private drawPanelDesktop(
-    px: number,
-    py: number,
-    pw: number,
-    ph: number,
-    r: number,
-    radius: { tl: number; tr: number; br: number; bl: number }
-  ) {
-    const F = CONFIG_DESKTOP.frame;
-    const DEPTH = CONFIG_DESKTOP.depth;
-    const GOLD = F.borderColor;
 
-    // AUDITORÍA/CORRECCIÓN D1 (punto 1): `frameFill` es NEGATIVO — el relleno
-    // translúcido del marco (y su halo exterior) SIEMPRE detrás de los
-    // símbolos (depth 0). Antes usaba `DEPTH.frame-2`/`-1` (8/9, POSITIVOS),
-    // por encima de los símbolos — esa era la causa exacta del "velo azul"
-    // lavando los símbolos (y, al estar tan alto en la escala, también se
-    // notaba cerca de los controles de abajo).
-    const glow = this.add.graphics().setDepth(DEPTH.frameFill - 1);
-    for (let i = 3; i >= 1; i--) {
-      const gr = { tl: r + i * 6, tr: r + i * 6, br: r + i * 6, bl: r + i * 6 };
-      glow.fillStyle(GOLD, 0.05);
-      glow.fillRoundedRect(px - i * 8, py - i * 8, pw + i * 16, ph + i * 16, gr);
-    }
-    this.debugTrack("MARCO halo exterior", glow);
-    const panel = this.add.graphics().setDepth(DEPTH.frameFill);
-    // Punto 4: ~75% de opacidad, degradado vertical sutil entre dos tonos del
-    // mismo azul/morado (no un color plano).
-    panel.fillGradientStyle(F.fillTop, F.fillTop, F.fillBottom, F.fillBottom, F.fillAlpha * 0.95, F.fillAlpha * 0.95, F.fillAlpha, F.fillAlpha);
-    panel.fillRoundedRect(px, py, pw, ph, radius);
-    const innerR = { tl: r - 3, tr: r - 3, br: Math.max(0, r - 3), bl: Math.max(0, r - 3) };
-    panel.fillStyle(0xffffff, 0.04).fillRoundedRect(px + 5, py + 5, pw - 10, ph - 10, innerR);
-    // Separadores de columna muy sutiles, dorados.
-    panel.lineStyle(2, GOLD, 0.14);
-    for (let c = 1; c < this.cols; c++) {
-      const x = this.gridX + c * this.size;
-      panel.lineBetween(x, this.gridY, x, this.gridY + this.gridH);
-    }
-    // Borde dorado 6-8px reales + resplandor interior sutil + brillo que
-    // pulsa suavemente, igual que móvil.
-    this.debugTrack("MARCO relleno translúcido", panel);
-    const border = this.add.graphics().setDepth(DEPTH.frame);
-    const th = F.borderWidthPx;
-    border.lineStyle(th, GOLD, 1).strokeRoundedRect(px, py, pw, ph, radius);
-    this.debugTrack("MARCO borde dorado", border);
-    const innerGlow = this.add.graphics().setDepth(DEPTH.frame).setBlendMode(Phaser.BlendModes.ADD);
-    const innerInset = th + 3;
-    innerGlow.lineStyle(Math.max(4, th), GOLD, 0.18).strokeRoundedRect(
-      px + innerInset, py + innerInset, pw - innerInset * 2, ph - innerInset * 2,
-      { tl: Math.max(0, r - innerInset), tr: Math.max(0, r - innerInset), br: Math.max(0, r - innerInset), bl: Math.max(0, r - innerInset) }
-    );
-    this.debugTrack("MARCO resplandor interior", innerGlow);
-    this.tweens.add({
-      targets: [border, innerGlow],
-      alpha: 0.5,
-      duration: 1700,
-      yoyo: true,
-      repeat: -1,
-      ease: "Sine.easeInOut",
-    });
-  }
 
-  // ====================================================================== //
-  // PERSONAJES DECORATIVOS DESKTOP (Fase 2, punto 2) — módulo aislado: solo  //
-  // se llama cuando !isMobile && !portrait. PLACEHOLDER: el modelo de tema   //
-  // actual no tiene un asset dedicado para "personaje decorativo" (Homer,   //
-  // etc.) — solo fondo/logo/banners genéricos (ver constants.ts TEX) —, así  //
-  // que se dibuja una silueta simple + etiqueta en vez de un sprite real,    //
-  // por Regla 4 ("si falta un asset, usa un placeholder con nombre claro").  //
-  // Tamaños recomendados para el asset real, en el mensaje final de la fase. //
-  // En pantallas ~16:9 casi exactas el margen lateral es angosto a propósito //
-  // (Fase 2 solo ensanchó lo necesario para dar cabida a esto en la mayoría  //
-  // de monitores) y el personaje se omite si no entra holgado, en vez de     //
-  // forzarlo apretado contra el marco.                                      //
-  // ====================================================================== //
-  private drawDesktopDecorCharacters() {
-    const D = CONFIG_DESKTOP;
-    if (!D.decorChar.enabled) return;
-    const frameLeft = this.gridX - this.panelPad;
-    const frameRight = this.gridX + this.gridW + this.panelPad;
-    // CORRECCIÓN D2 (punto 4): estirado desde la rejilla hasta el FINAL de
-    // la barra (antes solo cubría el alto de la rejilla — "por encima de la
-    // barra" pedía que llegaran hasta ahí). Profundidad dedicada
-    // (`decorChar`, entre `hudBar` y `hud`): se ve POR ENCIMA del fondo de
-    // la barra (si no, el 88% de opacidad de la Corrección D2 punto 2 lo
-    // tapa del todo) pero DEBAJO de sus botones — si el margen es angosto y
-    // choca con el grupo izquierdo/derecho de la barra, el botón sigue
-    // viéndose por delante, nunca al revés.
-    const topY = this.gridY;
-    const bottomY = this.barTop + this.footerH;
-    const centerY = (topY + bottomY) / 2;
-    const h = bottomY - topY;
-
-    const drawSide = (bandX0: number, bandX1: number, name: string) => {
-      const marginW = bandX1 - bandX0;
-      if (marginW < 60) return; // sin sitio útil (pantalla ~16:9 casi exacta) — se omite, no se aprieta
-      // Nunca se sale de [bandX0, bandX1] (el margen REAL fuera del marco) —
-      // "que no queden cortados bruscamente por el borde de la pantalla":
-      // bandX0 es `this.contentX` (o `frameRight`), nunca el borde físico de
-      // la ventana salvo en ultra-wide, donde sí hay de sobra.
-      const w = Math.min(marginW * D.decorChar.widthPct, marginW - 12);
-      const cx = (bandX0 + bandX1) / 2;
-      const g = this.add.graphics().setDepth(D.depth.decorChar);
-      g.fillStyle(0x000000, 0.22).fillRoundedRect(cx - w / 2, centerY - h / 2, w, h, Math.round(w * 0.3));
-      g.lineStyle(2, 0xffffff, 0.25).strokeRoundedRect(cx - w / 2, centerY - h / 2, w, h, Math.round(w * 0.3));
-      this.debugTrack(`${name} caja`, g);
-      const placeholderTxt = this.add
-        .text(cx, centerY, "PERSONAJE\n(placeholder)", {
-          fontFamily: "Arial, sans-serif",
-          fontSize: `${Math.max(12, Math.round(w * 0.09))}px`,
-          align: "center",
-          color: "#ffffff",
-        })
-        .setOrigin(0.5)
-        .setAlpha(0.4)
-        .setDepth(D.depth.decorChar + 1);
-      this.debugTrack(`${name} texto`, placeholderTxt);
-      this.debugRegisterBox(name, cx, centerY, w, h);
-    };
-    drawSide(this.contentX, frameLeft, "PERSONAJE IZQ");
-    drawSide(frameRight, this.contentX + this.contentW, "PERSONAJE DER");
-  }
-
-  // Panel de GANANCIA (solo móvil): mismo estilo que el panel de la rejilla,
-  // ADOSADO justo a su borde inferior — se lee como una sola cápsula continua,
-  // no como un texto suelto flotando con un hueco encima. Solo redondea las
-  // esquinas INFERIORES (las superiores quedan a ras del panel de la rejilla,
-  // que ahora también tiene las suyas cuadradas) y NO traza el lado superior:
-  // ese borde ya lo pintó el panel de arriba, justo encima.
-  private drawWinPanel() {
-    const pad = this.panelPad;
-    const r = Math.round(this.size * 0.22);
-    const px = this.gridX - pad;
-    const py = this.gridY + this.gridH + pad;
-    const pw = this.gridW + pad * 2;
-    const ph = this.winPanelH;
-    const radius = { tl: 0, tr: 0, br: r, bl: r };
-
-    const panel = this.add.graphics().setDepth(-2);
-    panel.fillStyle(0xffffff, 0.12).fillRoundedRect(px, py, pw, ph, radius);
-    panel.fillStyle(0xffffff, 0.06).fillRoundedRect(px + 5, py + 5, pw - 10, ph - 10, {
-      tl: 0, tr: 0, br: Math.max(0, r - 3), bl: Math.max(0, r - 3),
-    });
-    this.strokeGradientRoundedRect(px, py, pw, ph, radius, { skipTop: true });
-  }
 
   private lerpColor(a: number, b: number, t: number): number {
     const ar = (a >> 16) & 0xff, ag = (a >> 8) & 0xff, ab = a & 0xff;
@@ -1315,67 +1140,6 @@ export class SlotScene extends Phaser.Scene {
     return (r << 16) | (g << 8) | bl;
   }
 
-  // Traza un rectángulo redondeado con el borde en DEGRADADO continuo (acento <->
-  // blanco). Graphics de Phaser no sabe pintar un trazo con degradado real, así
-  // que se aproxima con muchos segmentos cortos, cada uno con el color
-  // interpolado según su posición en el perímetro (esquinas incluidas).
-  // `radius` admite un número (4 esquinas iguales) o {tl,tr,br,bl} para redondear
-  // solo algunas (p. ej. el panel de GANANCIA solo redondea las inferiores, para
-  // que las superiores queden a ras del borde de la rejilla, sin costura).
-  // `skipTop`: no traza el lado superior (ni sus esquinas) — se usa en el panel
-  // de GANANCIA porque ese borde ya lo pinta el borde inferior de la rejilla
-  // justo encima; dibujarlo dos veces duplicaba la línea en la costura.
-  private strokeGradientRoundedRect(
-    x: number,
-    y: number,
-    w: number,
-    h: number,
-    radius: number | { tl: number; tr: number; br: number; bl: number },
-    opts: { skipTop?: boolean; depth?: number } = {}
-  ) {
-    const { tl, tr, br, bl } =
-      typeof radius === "number" ? { tl: radius, tr: radius, br: radius, bl: radius } : radius;
-    const g = this.add.graphics().setDepth(opts.depth ?? -1);
-    const th = Math.max(4, Math.round(this.size * 0.05));
-    const P = Math.PI;
-
-    const points: { x: number; y: number }[] = [];
-    const addLine = (x1: number, y1: number, x2: number, y2: number) => {
-      const n = Math.max(4, Math.round(Math.hypot(x2 - x1, y2 - y1) / 5));
-      for (let i = 0; i <= n; i++) {
-        const t = i / n;
-        points.push({ x: x1 + (x2 - x1) * t, y: y1 + (y2 - y1) * t });
-      }
-    };
-    const addArc = (cx: number, cy: number, rad: number, a0: number, a1: number) => {
-      if (rad <= 0) return;
-      const n = Math.max(6, Math.round((rad * Math.abs(a1 - a0)) / 5));
-      for (let i = 0; i <= n; i++) {
-        const a = a0 + (a1 - a0) * (i / n);
-        points.push({ x: cx + Math.cos(a) * rad, y: cy + Math.sin(a) * rad });
-      }
-    };
-    // Recorrido en sentido horario. Si `skipTop`, arranca en la esquina superior
-    // derecha (sin lado ni esquinas de arriba) y termina en la superior izquierda.
-    if (!opts.skipTop) {
-      addLine(x + tl, y, x + w - tr, y);
-      addArc(x + w - tr, y + tr, tr, -P / 2, 0);
-    }
-    addLine(x + w, y + tr, x + w, y + h - br);
-    addArc(x + w - br, y + h - br, br, 0, P / 2);
-    addLine(x + w - br, y + h, x + bl, y + h);
-    addArc(x + bl, y + h - bl, bl, P / 2, P);
-    addLine(x, y + h - bl, x, y + tl);
-    if (!opts.skipTop) addArc(x + tl, y + tl, tl, P, P * 1.5);
-
-    const n = points.length;
-    for (let i = 0; i < n - 1; i++) {
-      const phase = (i / n) * 2; // 0..2: sube acento->blanco y baja blanco->acento
-      const t = phase <= 1 ? phase : 2 - phase;
-      g.lineStyle(th, this.lerpColor(this.accent, 0xffffff, t), 1);
-      g.lineBetween(points[i].x, points[i].y, points[i + 1].x, points[i + 1].y);
-    }
-  }
 
   // Códigos REALES de los símbolos del casino, preferentemente los que YA tienen
   // textura cargada, para que el desenfoque del giro use las imágenes subidas y no
@@ -1390,34 +1154,34 @@ export class SlotScene extends Phaser.Scene {
   private buildReels() {
     this.reels = [];
     const pool = this.symbolPool();
-    // SOLO MÓVIL (Fases 2 y 4): sin cuadro gris por celda + sombra/brillo en
-    // el símbolo. FASE 2 DESKTOP (punto 5/6): escritorio real adopta el MISMO
-    // tratamiento visual (flatCells/symbolFx) — ya no pasa por `this.isMobile`
-    // solo, sino por "¿es un modo con HUD propio?" (móvil o escritorio real),
-    // dejando afuera ÚNICAMENTE el fallback de ventana angosta no táctil
-    // (portrait && !isMobile), que conserva el cuadro gris de siempre. El
-    // flag `mobile` (física de giro: turbo/anticipación/aceleración) NO
-    // cambia — sigue siendo exclusivo de móvil real.
-    const useFloatingSymbols = this.isMobile || !this.portrait;
+    // Símbolos "flotantes" (sin cuadro gris) + sombra/brillo en ambos diseños.
+    // Horizontal: UNA máscara para todos los carretes y sombras HORNEADAS en
+    // textura (sin preFX por sprite) — ver Reel/ReelOptions.
+    const desktop = !this.isMobile;
+    if (desktop) {
+      this.reelsRoot = this.add.container(0, 0).setDepth(CONFIG_DESKTOP.depth.reels);
+      this.reelsMask = this.make.graphics({});
+      this.reelsMask.fillStyle(0xffffff).fillRect(this.gridX, this.gridY, this.gridW, this.gridH);
+      this.reelsRoot.setMask(this.reelsMask.createGeometryMask());
+    }
     for (let c = 0; c < this.cols; c++) {
-      this.reels.push(
-        new Reel(
-          this,
-          this.gridX + c * this.size,
-          this.gridY,
-          c,
-          this.rows,
-          this.size,
-          pool,
-          useFloatingSymbols,
-          useFloatingSymbols,
-          this.isMobile,
-          // CORRECCIÓN 4 (punto 3): alto de celda — en desktop this.cellH ===
-          // this.size siempre (celda cuadrada, sin cambios); en móvil puede
-          // ser distinto (celdas 4:5, ver computeLayoutMobile).
-          this.cellH
-        )
+      const reel = new Reel(
+        this,
+        this.gridX + c * this.size,
+        this.gridY,
+        c,
+        this.rows,
+        this.size,
+        pool,
+        true,
+        true,
+        this.isMobile,
+        // Alto de celda: 4:5 en móvil; en horizontal, la proporción de las celdas del marco.
+        this.cellH,
+        desktop ? { ownMask: false, textureSuffix: SlotScene.BAKED_SUFFIX } : undefined
       );
+      this.reels.push(reel);
+      this.reelsRoot?.add(reel.root);
     }
   }
 
@@ -1513,16 +1277,6 @@ export class SlotScene extends Phaser.Scene {
       .setVisible(false);
   }
 
-  // -------------------------------------------------------------------- //
-  // Barra de controles inferior (estilo Pragmatic/Playtech): SALDO ·      //
-  // APUESTA (con −/+) · GANANCIA, y el botón de girar al centro.          //
-  // -------------------------------------------------------------------- //
-  // Imagen "cover" (puede recortar, nunca deja huecos): para banners que deben
-  // cubrir una franja entera de borde a borde, a diferencia de fitImage (contain).
-  private coverImage(img: Phaser.GameObjects.Image, w: number, h: number) {
-    const t = img.texture.getSourceImage();
-    img.setScale(Math.max(w / t.width, h / t.height));
-  }
 
   // Estira la imagen a (w, h) EXACTOS, en X e Y por separado, sin respetar su
   // proporción original y SIN el tope de escala 1 de `fitImage` (que nunca agranda
@@ -1534,612 +1288,11 @@ export class SlotScene extends Phaser.Scene {
     img.setScale(w / t.width, h / t.height);
   }
 
-  private buildControls() {
-    const barH = this.footerH;
-    const P = this.portrait;
 
-    // Banner de fondo de la barra inferior (cubre toda la franja de controles, por
-    // DEBAJO de botones/texto). Opcional: si el tema no lo subió, no se dibuja nada.
-    if (this.textures.exists(TEX.footerBanner)) {
-      const fb = this.add.image(this.W / 2, this.barTop + barH / 2, TEX.footerBanner).setDepth(1);
-      this.coverImage(fb, this.W, barH);
-    }
-    const labelSize = Math.round(Math.min(this.W * (P ? 0.034 : 0.026), P ? 18 : 19));
-    const valueSize = Math.round(Math.min(this.W * (P ? 0.055 : 0.043), P ? 33 : 36));
 
-    const spinMax = P
-      ? Math.min(barH * 0.5, this.W * 0.3, 150)
-      : Math.min(barH * 0.86, 130, this.W * 0.15);
-    const btnR = Math.min(spinMax * 0.32, P ? 32 : 26);
-    const tR = Math.min(barH * (P ? 0.09 : 0.15), P ? 25 : 22);
-    // Alto real de la caja de CRÉDITO/APUESTA (se necesita YA para encadenar las
-    // filas del footer sin que se pisen entre sí — ver más abajo).
-    const statBoxH = (labelSize + valueSize) * 2.6;
 
-    // Posiciones según orientación (móvil = apilado; escritorio = giro a la derecha).
-    let spinX: number, spinY: number, minusX: number, plusX: number;
-    let creditX: number, creditY: number, betX: number, betY: number;
-    let autoX: number, autoY: number, turboX: number, turboY: number;
-    let musicX: number, musicY: number;
-    let infoX = 0, infoY = 0;
 
-    if (P) {
-      // MÓVIL: de nuevo por fracción de `barH` (el encadenado de la vez pasada se
-      // veía mal) — giro con −/+ un poco más abajo/centrado, crédito/apuesta
-      // debajo, iconos pegados al fondo.
-      spinX = this.W / 2;
-      spinY = this.barTop + barH * 0.32;
-      minusX = spinX - spinMax / 2 - 18 - btnR;
-      plusX = spinX + spinMax / 2 + 18 + btnR;
-      creditX = this.W * 0.28; betX = this.W * 0.72;
-      creditY = betY = this.barTop + barH * 0.62;
-      const iconY = this.barTop + barH * 0.86;
-      // Iconos como fila centrada horizontalmente: se reparten simétricamente
-      // alrededor del centro según CUÁNTOS vayan a dibujarse de verdad (si el tema
-      // no subió música, el botón no se crea — ver setupMusic — y reservarle un
-      // hueco igual dejaba el trío info/auto/turbo descentrado hacia la izquierda).
-      const hasMusicIcon = this.textures.exists(TEX.musicOn) && this.textures.exists(TEX.musicOff);
-      const iconCount = hasMusicIcon ? 4 : 3;
-      const iconGap = tR * 2.7;
-      const iconSlotX = (i: number) => this.W / 2 + iconGap * (i - (iconCount - 1) / 2);
-      infoX = iconSlotX(0);
-      autoX = iconSlotX(1);
-      turboX = iconSlotX(2);
-      musicX = hasMusicIcon ? iconSlotX(3) : -9999; // fuera de pantalla: setupMusic no lo crea igual
-      infoY = turboY = autoY = musicY = iconY;
-    } else {
-      // ESCRITORIO: giro a la derecha con −/+; TURBO/AUTO AL LADO del − (no debajo,
-      // así el AUTO no se sale de pantalla); crédito/apuesta a la izquierda.
-      const rightMargin = Math.max(28, this.W * 0.03);
-      plusX = this.W - rightMargin - btnR;
-      spinX = plusX - btnR - 22 - spinMax / 2;
-      spinY = this.buttonY;
-      minusX = spinX - spinMax / 2 - 22 - btnR;
-      autoX = Math.max(tR + 6, minusX - btnR - tR - 24);
-      turboX = Math.max(tR + 6, autoX - tR * 2 - 18);
-      infoX = Math.max(tR + 6, turboX - tR * 2 - 18);
-      autoY = turboY = infoY = spinY;
-      creditX = Math.max(96, this.W * 0.1); creditY = this.barTop + barH * 0.34;
-      betX = creditX; betY = this.barTop + barH * 0.72;
-      musicX = Math.max(tR + 10, this.W * 0.03); musicY = spinY;
-    }
 
-    // Fondos decorativos detrás de CRÉDITO/APUESTA (opcionales). Se ESTIRAN a
-    // propósito (ver stretchImage): si se usara fitImage, un banner subido chico
-    // nunca crece más allá de su tamaño nativo y se ve enano sin importar cuánto
-    // midan statBoxW/H.
-    const statBoxW = Math.min(this.W * 0.38, 290);
-    if (this.textures.exists(TEX.balanceBanner)) {
-      const bb = this.add.image(creditX, creditY, TEX.balanceBanner).setDepth(6);
-      this.stretchImage(bb, statBoxW, statBoxH);
-    }
-    if (this.textures.exists(TEX.betBanner)) {
-      const btb = this.add.image(betX, betY, TEX.betBanner).setDepth(6);
-      this.stretchImage(btb, statBoxW, statBoxH);
-    }
-
-    // CRÉDITO / APUESTA.
-    this.balanceValue = this.makeStat(creditX, creditY, `CRÉDITO · ${this.currency}`, this.money(this.balance), labelSize, valueSize, "#ffffff");
-    this.betValue = this.makeStat(betX, betY, "APUESTA", this.money(this.bet), labelSize, valueSize, this.accentHex);
-
-    // Pista de turbo (solo escritorio: hay sitio) + GANANCIA (aparece al ganar).
-    if (!P) {
-      this.add
-        .text(this.W / 2, this.barTop + barH * 0.3, "MANTÉN ESPACIO PARA TIRADA TURBO", {
-          fontFamily: "Arial, sans-serif", fontSize: `${labelSize}px`, fontStyle: "bold",
-          color: "#ffffff", stroke: "#000000", strokeThickness: 3,
-        })
-        .setOrigin(0.5).setShadow(0, 2, "#000000", 5, false, true).setDepth(7);
-    }
-    // GANANCIA: en el fallback de ventana angosta no táctil, arriba (franja
-    // del logo); en móvil, pegada bajo la rejilla (ver buildControlsMobile).
-    // En ESCRITORIO real, ver drawWinInfoDesktop() (Fase 2, punto 7) —
-    // reemplaza el banner amarillo por texto con degradado dorado. Va en un
-    // contenedor para OCULTARLA mientras se muestra el banner de victoria.
-    if (!P) {
-      this.drawWinInfoDesktop();
-    } else {
-      const winY = this.winRowY;
-      if (this.textures.exists(TEX.topbarBanner)) {
-        // depth 4: por DEBAJO de winGfx/prizeBanner (5) y winText/GANANCIA (6), si no
-        // tapa el texto del premio (ya pasó: quedaba por encima al añadirse después).
-        const tb = this.add.image(this.W / 2, winY, TEX.topbarBanner).setDepth(4);
-        // El panel de GANANCIA tiene un ancho y alto FIJOS (el mismo cápsula
-        // adosada a la rejilla — ver drawWinPanel): el banner subido por el casino
-        // debe ocupar TODO ese espacio horizontal, estirado si hace falta.
-        this.stretchImage(tb, this.gridW + this.panelPad * 2, this.winPanelH);
-      }
-      const gLabel = this.add
-        .text(this.W / 2, winY - valueSize * 0.6, "GANANCIA", {
-          fontFamily: "Arial, sans-serif", fontSize: `${labelSize}px`, fontStyle: "bold",
-          color: "#ffffff", stroke: "#000000", strokeThickness: 3,
-        })
-        .setOrigin(0.5).setShadow(0, 2, "#000000", 5, false, true);
-      this.winValue = this.add
-        .text(this.W / 2, winY + labelSize * 0.7, this.money(0), {
-          fontFamily: "Arial, sans-serif", fontSize: `${valueSize}px`, fontStyle: "bold",
-          color: "#06d6a0", stroke: "#000000", strokeThickness: 5,
-        })
-        .setOrigin(0.5).setShadow(0, 2, "#000000", 6, false, true);
-      this.winGroup = this.add.container(0, 0, [gLabel, this.winValue]).setDepth(7);
-    }
-
-    // Botón de giro (imagen del tema, o círculo de acento con la flecha ⟳).
-    const hasSpinImg = this.textures.exists(TEX.spinBtn);
-    if (!hasSpinImg) {
-      const circle = this.add.graphics().setDepth(7);
-      circle.fillStyle(this.accent, 1).fillCircle(spinX, spinY, spinMax / 2);
-      circle.lineStyle(4, 0xffffff, 0.55).strokeCircle(spinX, spinY, spinMax / 2);
-    }
-    this.button = this.add
-      .image(spinX, spinY, hasSpinImg ? TEX.spinBtn : TEX.button)
-      .setDepth(8)
-      .setInteractive({ useHandCursor: true });
-    if (hasSpinImg) this.fitImage(this.button, spinMax, spinMax);
-    else this.button.setVisible(false);
-    this.buttonLabel = this.add
-      .text(spinX, spinY, hasSpinImg ? "" : "⟳", {
-        fontFamily: "Arial, sans-serif",
-        fontSize: `${Math.round(spinMax * 0.5)}px`,
-        fontStyle: "bold",
-        color: "#ffffff",
-      })
-      .setOrigin(0.5)
-      .setDepth(9);
-    this.button.on("pointerdown", () => this.onSpin());
-    const pulseTarget = hasSpinImg ? this.button : this.buttonLabel;
-    this.pulse = this.tweens.add({
-      targets: pulseTarget,
-      scale: pulseTarget.scale * 1.06,
-      duration: 750,
-      yoyo: true,
-      repeat: -1,
-      ease: "Sine.easeInOut",
-    });
-
-    // −/+ (cambian la apuesta).
-    this.makeRoundButton(minusX, spinY, "−", btnR, () => this.changeBet(-1), TEX.betMinus);
-    this.makeRoundButton(plusX, spinY, "+", btnR, () => this.changeBet(1), TEX.betPlus);
-
-    // TURBO / AUTO.
-    this.autoToggle = this.makeToggle(autoX, autoY, "∞", "AUTO", tR, () => this.toggleAuto(), TEX.autoOn, TEX.autoOff);
-    this.turboToggle = this.makeToggle(turboX, turboY, "⚡", "TURBO", tR, () => this.toggleTurbo(), TEX.turboOn, TEX.turboOff);
-    this.turboToggle.setActive(this.turbo);
-
-    // INFO (combinaciones ganadoras): abre el modal de paytable, que vive en React.
-    this.makeToggle(infoX, infoY, "i", "INFO", tR, () => this.runtime.onShowPaytable?.(), TEX.infoBtn, TEX.infoBtn);
-
-    // Música.
-    this.musicR = tR;
-    this.musicX = musicX;
-    this.musicY = musicY;
-  }
-
-  // ====================================================================== //
-  // GANANCIA DESKTOP (Fase 2, punto 7) — módulo aislado: solo se llama desde //
-  // buildControls() cuando !portrait (escritorio real). Reemplaza el banner //
-  // amarillo con imagen por texto con degradado dorado (mismo tratamiento   //
-  // que el logo/GANANCIA móvil) — etiqueta chica arriba, monto grande       //
-  // abajo, centrado entre el marco y la barra de control. Asigna            //
-  // this.winValue/this.winGroup, los mismos campos que usa TODO el código   //
-  // compartido de celebración de victorias (rollUpText, etc.) — no se tocó  //
-  // nada de esa lógica, solo cómo se dibuja el texto.                       //
-  // ====================================================================== //
-  private drawWinInfoDesktop() {
-    const winY = this.topInfoY;
-    // MISMA fórmula que reservó el espacio en computeLayoutDesktop() —
-    // winInfoMetrics() es la única fuente de verdad para estos tamaños.
-    const { labelSize, valueSize, topOffset, bottomOffset } = this.winInfoMetrics(this.gridW);
-    const gLabel = this.goldGradientText(
-      this.W / 2, winY - topOffset + labelSize / 2, "GANANCIA", labelSize,
-      "#3d230a", ["#fff6c8", "#ffd23f", "#b5790a"], Math.max(2, Math.round(labelSize * 0.16))
-    );
-    this.winValue = this.goldGradientText(
-      this.W / 2, winY + bottomOffset - valueSize / 2, this.money(0), valueSize,
-      "#3d230a", ["#fff6c8", "#ffd23f", "#b5790a"], Math.max(3, Math.round(valueSize * 0.12))
-    );
-    this.winGroup = this.add.container(0, 0, [gLabel, this.winValue]).setDepth(CONFIG_DESKTOP.depth.hud);
-    this.debugTrack("GANANCIA etiqueta", gLabel);
-    this.debugTrack("GANANCIA monto", this.winValue);
-    this.debugTrack("GANANCIA contenedor", this.winGroup);
-    this.debugRegisterBox("GANANCIA (texto)", this.W / 2, winY, this.gridW * 0.6, topOffset + bottomOffset);
-  }
-
-  // ====================================================================== //
-  // EXTRAS DESKTOP (Fase 1) — botón de pantalla completa + tecla F + debug  //
-  // de zonas. Aislado: solo se llama cuando !isMobile && !portrait. No      //
-  // toca buildControls() ni ningún dibujado existente.                     //
-  // ====================================================================== //
-  private buildDesktopExtras() {
-    const D = CONFIG_DESKTOP;
-
-    // ---- Pantalla completa: SOLO la tecla F — CORRECCIÓN D1 (punto 6): el
-    // BOTÓN se quitó de aquí (vivía dibujado en el canvas, con su propio
-    // margen de 16px, desalineado del header DOM de atrás/salir). Ahora el
-    // botón vive en el MISMO header DOM que esos dos (ver PlayPage/
-    // EmbedPage.tsx — SlotGameCanvas les entrega la función real por
-    // `onFullscreenReady`), así los tres comparten exactamente el mismo
-    // margen/fila sin ningún truco de alineación cruzada DOM-vs-canvas.
-    // F11 es un atajo nativo del navegador, fuera del control de la página;
-    // igual dispara un resize real que la escena ya recalcula (ver onResize).
-    if (D.fullscreen.enabled) {
-      this.input.keyboard?.on(`keydown-${D.fullscreen.keyCode}`, () => this.toggleDesktopFullscreen());
-    }
-
-    // ---- Debug: bounding boxes de las zonas principales de escritorio
-    // (Fase 1, punto 3/4) — mismo mecanismo que móvil (CONFIG_DESKTOP.debug.enabled).
-    // "ZONA SEGURA" y "BARRA CONTROL" (Fase 1) se quitaron de aquí: eran cajas
-    // GENÉRICAS que ahora encierran a todos los elementos reales que se
-    // registran por separado en drawWinInfoDesktop()/buildControlsDesktop()
-    // (Fases 2 y 3) — dejarlas generaba solapes "falsos" contra TODO lo de
-    // adentro, sin ninguna señal útil. LOGO y MARCO RODILLOS sí se quedan:
-    // sirven para detectar si el logo choca con el marco, un caso real.
-    this.debugRegisterBox("LOGO", this.logoX, this.logoY, this.logoMaxW, this.logoMaxH);
-    this.debugRegisterBox("MARCO RODILLOS", this.gridX + this.gridW / 2, this.gridY + this.gridH / 2, this.gridW + this.panelPad * 2, this.gridH + this.panelPad * 2);
-    this.debugCheckOverlaps();
-    // DIAGNÓSTICO D1b (PASO 2): tabla completa de objetos reales del HUD de
-    // escritorio — ver debugDumpObjects(). Al final de buildDesktopExtras()
-    // porque corre DESPUÉS de drawBackground/drawPanel/drawDesktopDecorCharacters/
-    // buildReels/drawTitle/drawBanner/buildControlsDesktop, es decir, cuando
-    // YA existen todos los objetos que se quieren volcar.
-    this.debugDumpObjects();
-  }
-
-  private toggleDesktopFullscreen() {
-    this.scale.toggleFullscreen();
-  }
-
-  // ====================================================================== //
-  // ÍCONO CIRCULAR DESKTOP (Fase 3, punto 5) — mismo lenguaje visual que      //
-  // mobileToggleIcon (disco glossy + glifo blanco), pero SIN la dependencia  //
-  // de CONFIG_MOBILE.layout.showIconCaptions/designScaleFactor (conceptos    //
-  // que no existen en escritorio, que usa Scale.RESIZE). En vez de una       //
-  // etiqueta siempre visible, muestra un TOOLTIP al pasar el mouse (la       //
-  // alternativa que pide el punto 5 — un mouse es, por definición, algo que  //
-  // solo existe en escritorio).                                             //
-  // ====================================================================== //
-  private desktopToggleIcon(
-    x: number,
-    y: number,
-    r: number,
-    glyph: string,
-    tooltip: string,
-    onClick?: () => void,
-    stub = false
-  ): Toggle {
-    const DEPTH = CONFIG_DESKTOP.depth;
-    const chip = this.mobileRoundChip(x, y, r, 0x0b0f1a, 0.45, 0xffffff, 0.7);
-    const glyphTxt = this.add
-      .text(x, y - 1, glyph, {
-        fontFamily: MOBILE_FONT,
-        fontSize: `${Math.round(r * 0.95)}px`,
-        fontStyle: "700",
-        color: "#ffffff",
-      })
-      .setOrigin(0.5)
-      .setShadow(0, 2, "#000000", 3, true, true)
-      .setDepth(DEPTH.hud + 1);
-    const tip = this.add
-      .text(x, y - r - 10, tooltip, {
-        fontFamily: MOBILE_FONT,
-        fontSize: "13px",
-        fontStyle: "700",
-        color: "#ffffff",
-        backgroundColor: "#0b0f1ae0",
-        padding: { x: 8, y: 4 },
-      })
-      .setOrigin(0.5, 1)
-      .setAlpha(0)
-      .setDepth(DEPTH.overlays);
-    // FASE 4 DESKTOP (punto 1): hover — escala leve (1.06) en el disco+glifo
-    // + un halo ADD suave, además del tooltip (punto 3). "Presionado" sigue
-    // siendo mobilePressFeedback de siempre (no se duplica).
-    const hoverHalo = this.add
-      .image(x, y, TEX.glow)
-      .setBlendMode(Phaser.BlendModes.ADD)
-      .setTint(0xffffff)
-      .setDisplaySize(r * 2.5, r * 2.5)
-      .setAlpha(0)
-      .setDepth(DEPTH.hud);
-    this.debugTrack(`${tooltip} chip`, chip);
-    this.debugTrack(`${tooltip} glifo`, glyphTxt);
-    this.debugTrack(`${tooltip} halo-hover (TEX.glow)`, hoverHalo);
-    const hoverIn = () => {
-      this.tweens.add({ targets: [chip, glyphTxt], scale: 1.06, duration: 140, ease: "Sine.easeOut" });
-      this.tweens.add({ targets: tip, alpha: 1, duration: 120 });
-      this.tweens.add({ targets: hoverHalo, alpha: 0.3, duration: 120 });
-    };
-    const hoverOut = () => {
-      this.tweens.add({ targets: [chip, glyphTxt], scale: 1, duration: 160, ease: "Sine.easeOut" });
-      this.tweens.add({ targets: tip, alpha: 0, duration: 120 });
-      this.tweens.add({ targets: hoverHalo, alpha: 0, duration: 120 });
-    };
-    if (!stub && onClick) {
-      this.add
-        .zone(x, y, r * 2.2, r * 2.2)
-        .setInteractive({ useHandCursor: true })
-        .setDepth(DEPTH.hud + 2)
-        .on("pointerover", hoverIn)
-        .on("pointerout", hoverOut)
-        .on("pointerdown", () => {
-          this.mobilePressFeedback(x, y, r, [glyphTxt]);
-          onClick();
-        });
-    } else {
-      // Stub (p. ej. MENÚ, todavía sin funcionalidad): el tooltip y el hover
-      // SÍ se muestran al pasar el mouse (confirma qué es y que "se ve
-      // activo"), pero no reacciona al clic.
-      this.add
-        .zone(x, y, r * 2.2, r * 2.2)
-        .setInteractive({ useHandCursor: false })
-        .setDepth(DEPTH.hud + 2)
-        .on("pointerover", hoverIn)
-        .on("pointerout", hoverOut);
-    }
-    const setActive = (on: boolean) => {
-      chip.clear();
-      chip.fillStyle(0x0b0f1a, on ? 0.65 : 0.45).fillCircle(0, 0, r);
-      chip.lineStyle(Math.max(2, Math.round(r * 0.06)), on ? this.accent : 0xffffff, on ? 1 : 0.7).strokeCircle(0, 0, r);
-      chip.lineStyle(Math.max(1.5, r * 0.03), 0xffffff, 0.35);
-      chip.beginPath();
-      chip.arc(0, 0, r * 0.86, Math.PI * 1.08, Math.PI * 1.92, false);
-      chip.strokePath();
-      glyphTxt.setColor(on ? this.accentHex : "#ffffff");
-    };
-    this.debugRegisterBox(tooltip, x, y, r * 2, r * 2);
-    return { setActive };
-  }
-
-  // ====================================================================== //
-  // BARRA DE CONTROL DESKTOP (Fase 3) — módulo aislado: solo se llama cuando //
-  // !isMobile && !portrait. Mismo lenguaje visual que buildControlsMobile    //
-  // (reutiliza mobileRoundChip/mobileGlyphButton/mobilePressFeedback/        //
-  // mobileInfoPill — son dibujo genérico, sin nada específico de móvil       //
-  // adentro) con layout HORIZONTAL propio: izquierda info/menú/sonido,       //
-  // centro-izquierda CRÉDITO/APUESTA, centro texto de turbo, derecha         //
-  // auto/turbo/−/SPIN/+. Conecta a la MISMA lógica de siempre (onSpin/       //
-  // changeBet/toggleAuto/toggleTurbo/onShowPaytable/toggleMusic) — nada de   //
-  // eso se modificó.                                                        //
-  // ====================================================================== //
-  private buildControlsDesktop() {
-    const CB = CONFIG_DESKTOP.controlBar;
-    const C = CONFIG_DESKTOP.controls;
-    const DEPTH = CONFIG_DESKTOP.depth;
-    const W = this.W;
-    const barTop = this.barTop;
-    const barH = this.footerH;
-    this.debugBoxes = [];
-
-    // ---- GANANCIA (Fase 2, punto 7) — se construye junto con el resto del
-    // HUD de escritorio, ya que antes vivía dentro de buildControls().
-    this.drawWinInfoDesktop();
-
-    // ---- Fondo de la barra (punto 1): a TODO el ancho de la VENTANA real,
-    // anclado al borde real inferior (this.H: en Scale.RESIZE YA es el real,
-    // a diferencia de móvil no hace falta ningún truco de letterbox). SIN
-    // esquinas redondeadas — es un borde de pantalla, no un panel flotante
-    // como el de los rodillos, así que no tiene sentido recortarle las
-    // puntas justo en el borde físico del monitor.
-    const bg = this.add.graphics().setDepth(DEPTH.hudBar);
-    bg.fillGradientStyle(CB.fillTop, CB.fillTop, CB.fillBottom, CB.fillBottom, CB.fillAlpha, CB.fillAlpha, CB.fillAlpha, CB.fillAlpha);
-    bg.fillRect(0, barTop, W, barH);
-    bg.fillStyle(CB.topBorderColor, CB.topBorderAlpha).fillRect(0, barTop, W, CB.topBorderWidthPx);
-    this.debugTrack("BARRA fondo", bg);
-
-    // ---- Medidas compartidas, todas en px REALES (Scale.RESIZE) ----------
-    const sideMargin = Math.max(16, this.contentW * C.sideMarginPct);
-    // CORRECCIÓN D2 (punto 1): los 3 grupos ya no se reparten en TODO el
-    // ancho de la zona segura — viven dentro de un contenedor de ancho
-    // máximo ~1500px, CENTRADO, para que no se dispersen en monitores
-    // anchos (antes el hueco entre pastillas y la zona derecha crecía sin
-    // límite en 1920x1080+, dejando todo "flotando" muy separado).
-    const barContentW = Math.min(C.maxContentW, this.contentW - sideMargin * 2);
-    const barContentX0 = this.contentX + (this.contentW - barContentW) / 2;
-    // NOTA: a propósito NO se registra un debugBox para este contenedor —
-    // encerraría a TODO lo de adentro y generaría solapes "falsos" contra
-    // cada elemento (la misma razón por la que se quitaron "ZONA SEGURA"/
-    // "BARRA CONTROL" en la Corrección D1). Sus límites van en la tabla
-    // final de la respuesta, no acá.
-    const iconR = Math.max(C.iconMinR, barH * C.iconRPct);
-    const btnR = Math.max(C.betBtnMinR, barH * C.betBtnRPct); // mínimo ~52px de diámetro, mismo piso que móvil
-    const spinR = Math.min(barH * C.spinRPct, this.contentW * C.spinMaxContentWPct);
-    const pillH = barH * C.pillHPct;
-    const pillW = Math.min(this.contentW * C.pillWPct, C.pillMaxW);
-    const pillGap = this.contentW * C.pillGapPct;
-    const rowY = barTop + barH * 0.58; // fila principal (todo salvo SPIN, que sobresale arriba)
-    // Punto 5: "sobresale ~30% por encima de la barra" — el 30% del
-    // DIÁMETRO del SPIN queda por encima de `barTop`.
-    const spinY = barTop + spinR * (1 - 2 * C.spinProtrudePct);
-
-    // ---- Posiciones X de los 3 grupos — TODAS calculadas antes de dibujar
-    // nada, porque el grupo CENTRO (punto 1) necesita saber dónde terminan
-    // los otros dos para centrarse en el hueco que REALMENTE queda entre
-    // ellos (centrarlo en el punto medio del CONTENEDOR, sin más, no
-    // garantiza nada si el grupo derecho — SPIN incluido — es ancho: se
-    // confirmó por cálculo que en 1920x1080 el grupo centro invadía 116px
-    // del grupo derecho). ------------------------------------------------
-    const iconGap = iconR * 2.4;
-    // Izquierda: INFO, MENÚ, SONIDO — alineada al borde izquierdo del contenedor.
-    const leftX0 = barContentX0;
-    const infoX = leftX0 + iconR;
-    const menuX = infoX + iconGap;
-    const soundX = menuX + iconGap;
-    // Derecha: AUTO, TURBO, −, SPIN, + — alineada al borde derecho del
-    // contenedor. `spinSeparationPx` (nuevo, dedicado) separa el SPIN de
-    // −/+ para que no se pisen — independiente de `pillGap`, que es para
-    // otra cosa.
-    const rightX1 = barContentX0 + barContentW;
-    const plusX = rightX1 - btnR;
-    const spinGap = spinR + btnR + C.spinSeparationPx;
-    const spinX = plusX - btnR - spinGap;
-    const minusX = spinX - spinGap;
-    const turboX = minusX - btnR - iconGap;
-    const autoX = turboX - iconGap;
-    // Centro: CRÉDITO/APUESTA — centradas en el HUECO real entre los otros
-    // dos grupos (no en el centro geométrico del contenedor completo).
-    const leftGroupEnd = soundX + iconR;
-    const rightGroupStart = autoX - iconR;
-    const centerGapX = (leftGroupEnd + rightGroupStart) / 2;
-    const creditX = centerGapX - pillGap / 2 - pillW / 2;
-    const betX = centerGapX + pillGap / 2 + pillW / 2;
-
-    // ---- Dibuja los 3 grupos -----------------------------------------
-    this.desktopToggleIcon(infoX, rowY, iconR, "i", "INFO", () => this.runtime.onShowPaytable?.());
-    // MENÚ: mismo criterio que móvil — visible y con el mismo aspecto
-    // "activo" que los demás, pero sin funcionalidad todavía (stub).
-    this.desktopToggleIcon(menuX, rowY, iconR, "≡", "MENÚ", undefined, true);
-    this.musicToggleDesktop = this.desktopToggleIcon(soundX, rowY, iconR, "♪", "SONIDO", () => this.toggleMusic());
-    this.musicToggleDesktop.setActive(!this.musicMuted);
-
-    const credit = this.mobileInfoPill(creditX, rowY, pillW, pillH, "CRÉDITO", this.money(this.balance), ["#2be28a", "#0a6b3f"]);
-    this.balanceValue = credit.valueText;
-    this.creditPill = credit;
-    const bet = this.mobileInfoPill(betX, rowY, pillW, pillH, "APUESTA", this.money(this.bet), ["#ffc93f", "#a85d00"]);
-    this.betValue = bet.valueText;
-    this.betPill = bet;
-    this.debugTrack("CRÉDITO (pastilla, contenedor completo)", credit.cont);
-    this.debugTrack("APUESTA (pastilla, contenedor completo)", bet.cont);
-    this.debugRegisterBox("CRÉDITO", creditX, rowY, pillW, pillH);
-    this.debugRegisterBox("APUESTA", betX, rowY, pillW, pillH);
-
-    this.autoToggle = this.desktopToggleIcon(autoX, rowY, iconR, "∞", "AUTO", () => this.toggleAuto());
-    this.turboToggle = this.desktopToggleIcon(turboX, rowY, iconR, "⚡", "TURBO", () => this.toggleTurbo());
-    this.turboToggle.setActive(this.turbo);
-
-    // SPIN: anillo dorado + resplandor ADD + pulso lento en reposo — mismo
-    // recetario que móvil (CORRECCIÓN 4, punto 5). CORRECCIÓN D1 (punto 3):
-    // 2.2x en vez de 2.6x — más chico, menos "bloque" (ver también el margen
-    // agregado a la textura en PreloadScene). SOLO este, el de móvil (misma
-    // receta, otro lugar del archivo) no se tocó.
-    const spinGlow = this.add
-      .image(spinX, spinY, TEX.glow)
-      .setBlendMode(Phaser.BlendModes.ADD)
-      .setTint(0xffd23f)
-      .setDisplaySize(spinR * 2.2, spinR * 2.2)
-      .setAlpha(0.4)
-      .setDepth(DEPTH.hud - 1);
-    this.tweens.add({ targets: spinGlow, alpha: 0.7, duration: 1500, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
-    this.debugTrack("SPIN resplandor (TEX.glow)", spinGlow);
-    this.spinChip = this.mobileRoundChip(spinX, spinY, spinR, 0x0b0f1a, 0.55, 0xffffff, 0.85);
-    this.debugTrack("SPIN disco (mobileRoundChip)", this.spinChip);
-    const spinRing = this.add.graphics().setDepth(DEPTH.hud).setPosition(spinX, spinY);
-    spinRing.lineStyle(Math.max(3, Math.round(spinR * 0.05)), 0xffd23f, 0.95).strokeCircle(0, 0, spinR * 1.06);
-    const spinIdlePulse = this.tweens.add({
-      targets: [this.spinChip, spinRing],
-      scale: 1.045,
-      duration: 1800,
-      yoyo: true,
-      repeat: -1,
-      ease: "Sine.easeInOut",
-    });
-    this.button = this.add
-      .image(spinX, spinY, TEX.transparentPixel)
-      .setDisplaySize(spinR * 2, spinR * 2)
-      .setDepth(DEPTH.hud + 2)
-      .setInteractive({ useHandCursor: true });
-    this.buttonLabel = this.add
-      .text(spinX, spinY, "⟳", {
-        fontFamily: MOBILE_FONT,
-        fontSize: `${Math.round(spinR * 1.1)}px`,
-        fontStyle: "700",
-        color: "#ffffff",
-      })
-      .setOrigin(0.5)
-      .setShadow(0, 2, "#000000", 6, true, true)
-      .setDepth(DEPTH.hud + 3);
-    this.debugTrack("SPIN anillo", spinRing);
-    this.debugTrack("SPIN zona táctil (invisible)", this.button);
-    this.debugTrack("SPIN glifo ⟳", this.buttonLabel);
-    this.button.on("pointerdown", () => {
-      this.mobilePressFeedback(spinX, spinY, spinR, [this.buttonLabel]);
-      this.tweens.add({ targets: this.buttonLabel, angle: this.buttonLabel.angle + 360, duration: 500, ease: "Cubic.easeOut" });
-      this.onSpin();
-    });
-    // FASE 4 DESKTOP (punto 1): hover — escala leve en todo el conjunto del
-    // SPIN (disco+anillo+glifo) + el resplandor ADD se aviva un poco más.
-    // `spinChip`/`spinRing` (vía spinIdlePulse) y `buttonLabel` (vía
-    // this.pulse) YA tienen un tween de `scale` corriendo en bucle (el pulso
-    // de reposo) — animar `scale` DE NUEVO encima sin quitarlo primero sería
-    // el mismo bug de "dos tweens peleando por la misma propiedad" que ya se
-    // cazó antes en el fade de changeBet() en móvil. Se los QUITA al entrar
-    // el mouse y se recrean al salir (no al revés: `.resume()` seguiría
-    // desde su posición interna pausada, no desde el 1.0 real al que se
-    // animó el hover, y pegaría un salto visible). Si el botón está
-    // deshabilitado (girando), el hover no hace nada — no tiene sentido
-    // "reactivar" el pulso de un botón que sigue girando.
-    this.button.on("pointerover", () => {
-      if (this.busy) return;
-      this.pulse?.remove();
-      this.spinIdlePulse?.remove();
-      this.tweens.add({ targets: [this.spinChip, spinRing, this.buttonLabel], scale: 1.06, duration: 140, ease: "Sine.easeOut" });
-      this.tweens.add({ targets: spinGlow, alpha: 0.85, duration: 140 });
-    });
-    this.button.on("pointerout", () => {
-      if (this.busy) return;
-      this.tweens.add({
-        targets: [this.spinChip, spinRing, this.buttonLabel],
-        scale: 1,
-        duration: 160,
-        ease: "Sine.easeOut",
-        onComplete: () => {
-          this.spinIdlePulse = this.tweens.add({
-            targets: [this.spinChip, spinRing], scale: 1.045, duration: 1800, yoyo: true, repeat: -1, ease: "Sine.easeInOut",
-          });
-          this.pulse = this.tweens.add({
-            targets: this.buttonLabel, scale: 1.08, duration: 750, yoyo: true, repeat: -1, ease: "Sine.easeInOut",
-          });
-        },
-      });
-      this.tweens.add({ targets: spinGlow, alpha: 0.4, duration: 160 });
-    });
-    this.pulse = this.tweens.add({
-      targets: this.buttonLabel,
-      scale: 1.08,
-      duration: 750,
-      yoyo: true,
-      repeat: -1,
-      ease: "Sine.easeInOut",
-    });
-    this.spinIdlePulse = spinIdlePulse;
-    this.debugRegisterBox("SPIN", spinX, spinY, spinR * 2.2, spinR * 2.2);
-
-    // −/+: discos glossy + glifo (reemplaza la cabeza/el "+" de Bart del tema
-    // — punto 5 pide el mismo estilo circular glossy que el resto, no
-    // imágenes del tema aquí). Sin pulso de reposo propio (a diferencia del
-    // SPIN), así que el hover no necesita quitar/recrear nada — solo escala.
-    const minusChip = this.mobileRoundChip(minusX, rowY, btnR, 0x0b0f1a, 0.45, 0xffffff, 0.7);
-    const minusBtn = this.mobileGlyphButton(minusX, rowY, btnR, "−", () => this.changeBet(-1));
-    const plusChip = this.mobileRoundChip(plusX, rowY, btnR, 0x0b0f1a, 0.45, 0xffffff, 0.7);
-    const plusBtn = this.mobileGlyphButton(plusX, rowY, btnR, "+", () => this.changeBet(1));
-    this.debugTrack("BET- disco (mobileRoundChip)", minusChip);
-    this.debugTrack("BET- glifo", minusBtn.txt);
-    this.debugTrack("BET+ disco (mobileRoundChip)", plusChip);
-    this.debugTrack("BET+ glifo", plusBtn.txt);
-    // FASE 4 DESKTOP (punto 1): hover — misma escala leve que el resto.
-    for (const [chip, { txt, zone }] of [[minusChip, minusBtn], [plusChip, plusBtn]] as const) {
-      zone.on("pointerover", () => this.tweens.add({ targets: [chip, txt], scale: 1.06, duration: 140, ease: "Sine.easeOut" }));
-      zone.on("pointerout", () => this.tweens.add({ targets: [chip, txt], scale: 1, duration: 160, ease: "Sine.easeOut" }));
-    }
-    this.debugRegisterBox("BET-", minusX, rowY, btnR * 2, btnR * 2);
-    this.debugRegisterBox("BET+", plusX, rowY, btnR * 2, btnR * 2);
-
-    // ---- Texto de ayuda de turbo (punto 3): discreto, chico, DENTRO de la
-    // barra, centrado en el mismo contenedor de ancho máximo que los 3
-    // grupos (no en toda la zona segura — así queda centrado respecto al
-    // HUD, no respecto a toda la ventana). 12px/60% pedido. Se desvanece
-    // solo tras la primera tirada (this.turboHintText, ver onSpin()).
-    this.turboHintText = this.add
-      .text(barContentX0 + barContentW / 2, barTop + barH * 0.14, "MANTÉN ESPACIO PARA TIRADA TURBO", {
-        fontFamily: "Arial, sans-serif",
-        fontSize: "12px",
-        fontStyle: "bold",
-        color: "#ffffff",
-      })
-      .setOrigin(0.5)
-      .setAlpha(0.6)
-      .setDepth(DEPTH.hud);
-    this.debugTrack("Texto ayuda turbo", this.turboHintText);
-  }
 
   // ====================================================================== //
   // HUD MÓVIL (Fase 3) — módulo aislado: solo se llama cuando this.isMobile //
@@ -2412,7 +1565,7 @@ export class SlotScene extends Phaser.Scene {
     // se conoce el valor real — todo pasa en el mismo create() síncrono,
     // antes de que el jugador vea nada, así que no hay salto visible.
     this.bannerY = statY;
-    this.winText.setY(this.bannerY);
+    this.winText!.setY(this.bannerY);
     if (this.prizeBannerImg) this.prizeBannerImg.setY(this.bannerY);
     // Ese hueco es angosto (el de la pastilla GANANCIA, flanqueada por
     // APUESTA/CRÉDITO al mismo alto) — el ancho máximo del texto/banner de
@@ -2483,7 +1636,7 @@ export class SlotScene extends Phaser.Scene {
   // debug (CONFIG_MOBILE.debug.enabled / CONFIG_DESKTOP.debug.enabled) —
   // activarlo en uno no dibuja nada en el otro.
   private get debugEnabled(): boolean {
-    return this.isMobile ? CONFIG_MOBILE.debug.enabled : CONFIG_DESKTOP.debug.enabled;
+    return this.isMobile && CONFIG_MOBILE.debug.enabled;
   }
 
   private debugRegisterBox(name: string, x: number, y: number, w: number, h: number) {
@@ -2523,79 +1676,7 @@ export class SlotScene extends Phaser.Scene {
     }
   }
 
-  // DIAGNÓSTICO D1b (temporal, SOLO escritorio): registra un GameObject real
-  // (no un bounding box AABB) con un nombre legible, para poder volcarlo por
-  // consola — ver debugDumpObjects(). No dibuja nada ni cambia el objeto; es
-  // una referencia aparte. Respeta el mismo flag que el resto del debug
-  // (CONFIG_DESKTOP.debug.enabled) — en producción (flag apagado) esto no
-  // guarda nada y no cuesta memoria.
-  private debugTrack(name: string, obj: Phaser.GameObjects.GameObject) {
-    if (!this.debugEnabled) return;
-    this.debugObjects.push({ name, obj });
-  }
 
-  // DIAGNÓSTICO D1b: vuelca por consola, en una tabla, TODOS los objetos
-  // registrados con debugTrack() — nombre, tipo, depth, alpha, visible,
-  // posición, tamaño real en pantalla e interactividad. Es la "evidencia"
-  // pedida en el PASO 2: con esto se puede ver, objeto por objeto, si algo
-  // quedó con un alpha bajo, una posición inesperada, o si directamente no
-  // se creó. Solo corre si CONFIG_DESKTOP.debug.enabled es true.
-  private debugDumpObjects() {
-    if (!this.debugEnabled) return;
-    const rows = this.debugObjects.map(({ name, obj }) => {
-      const o = obj as unknown as {
-        type?: string;
-        depth?: number;
-        alpha?: number;
-        visible?: boolean;
-        x?: number;
-        y?: number;
-        displayWidth?: number;
-        displayHeight?: number;
-        input?: unknown;
-        texture?: { key?: string };
-      };
-      return {
-        nombre: name,
-        tipo: o.type ?? obj.constructor.name,
-        textura: o.texture?.key ?? "-",
-        depth: typeof o.depth === "number" ? o.depth : "-",
-        alpha: typeof o.alpha === "number" ? Math.round(o.alpha * 100) / 100 : "-",
-        visible: typeof o.visible === "boolean" ? o.visible : "-",
-        x: typeof o.x === "number" ? Math.round(o.x) : "-",
-        y: typeof o.y === "number" ? Math.round(o.y) : "-",
-        ancho: typeof o.displayWidth === "number" ? Math.round(o.displayWidth) : "-",
-        alto: typeof o.displayHeight === "number" ? Math.round(o.displayHeight) : "-",
-        interactivo: !!o.input,
-      };
-    });
-    // eslint-disable-next-line no-console
-    console.log(`DESKTOP_LAYOUT_V2 — volcado de ${rows.length} objetos registrados:`);
-    // eslint-disable-next-line no-console
-    console.table(rows);
-    // Objetos con la textura de resplandor (TEX.glow) que NO se registraron
-    // a mano arriba (p. ej. las "rosquillas" ambientales, que se crean en un
-    // bucle sin nombre individual) — para no dejar ninguno fuera del
-    // diagnóstico del punto (b) ("¿de dónde salen los cuadrados de brillo?").
-    const untracked = this.children.list.filter((o) => {
-      const img = o as unknown as { texture?: { key?: string } };
-      return img.texture?.key === TEX.glow && !this.debugObjects.some((d) => d.obj === o);
-    });
-    if (untracked.length) {
-      // eslint-disable-next-line no-console
-      console.log(`DESKTOP_LAYOUT_V2 — además, ${untracked.length} imágenes con TEX.glow sin nombre individual (rosquillas ambientales, destellos de clic, etc.):`);
-      // eslint-disable-next-line no-console
-      console.table(
-        untracked.map((o) => {
-          const img = o as unknown as { depth?: number; alpha?: number; x?: number; y?: number; displayWidth?: number; displayHeight?: number };
-          return {
-            depth: img.depth, alpha: img.alpha, x: Math.round(img.x ?? 0), y: Math.round(img.y ?? 0),
-            ancho: Math.round(img.displayWidth ?? 0), alto: Math.round(img.displayHeight ?? 0),
-          };
-        })
-      );
-    }
-  }
 
   // Disco semitransparente con borde claro (la "ficha" de cristal detrás de
   // cada botón circular del HUD móvil: giro, −/+, iconos).
@@ -3034,118 +2115,8 @@ export class SlotScene extends Phaser.Scene {
     return cont;
   }
 
-  // Crea un bloque "ETIQUETA / valor" centrado en (x, y); devuelve el texto del valor.
-  private makeStat(x: number, y: number, label: string, value: string, labelSize: number, valueSize: number, color: string) {
-    this.add
-      .text(x, y - valueSize * 0.6, label, {
-        fontFamily: "Arial, sans-serif",
-        fontSize: `${labelSize}px`,
-        fontStyle: "bold",
-        color: "#ffffff",
-        stroke: "#000000",
-        strokeThickness: 3,
-      })
-      .setOrigin(0.5)
-      .setShadow(0, 2, "#000000", 5, false, true)
-      .setDepth(7);
-    return this.add
-      .text(x, y + labelSize * 0.7, value, {
-        fontFamily: "Arial, sans-serif",
-        fontSize: `${valueSize}px`,
-        fontStyle: "bold",
-        color,
-        stroke: "#000000",
-        strokeThickness: 5,
-      })
-      .setOrigin(0.5)
-      .setShadow(0, 2, "#000000", 6, false, true)
-      .setDepth(7);
-  }
 
-  private makeRoundButton(x: number, y: number, glyph: string, r: number, onClick: () => void, texKey?: string) {
-    const hasImg = !!texKey && this.textures.exists(texKey);
-    if (hasImg) {
-      const img = this.add.image(x, y, texKey!).setDepth(9);
-      this.fitImage(img, r * 2.3, r * 2.3);
-    } else {
-      const g = this.add.graphics().setDepth(8);
-      g.fillStyle(0x1a2238, 0.95).fillCircle(x, y, r);
-      g.lineStyle(2, this.accent, 0.7).strokeCircle(x, y, r);
-      this.add
-        .text(x, y - 2, glyph, {
-          fontFamily: "Arial, sans-serif",
-          fontSize: `${Math.round(r * 1.3)}px`,
-          fontStyle: "bold",
-          color: "#ffd23f",
-        })
-        .setOrigin(0.5)
-        .setDepth(9);
-    }
-    this.add
-      .zone(x, y, r * 2, r * 2)
-      .setInteractive({ useHandCursor: true })
-      .setDepth(10)
-      .on("pointerdown", onClick);
-  }
 
-  // Botón redondo con estado. Usa imágenes on/off del tema si existen; si no,
-  // dibuja el círculo con el color de acento. Devuelve un handle para setActive.
-  private makeToggle(
-    x: number, y: number, glyph: string, caption: string, r: number, onClick: () => void,
-    onTex?: string, offTex?: string,
-  ): Toggle {
-    // Tolerante: basta con UNA de las dos imágenes (on/off). Si falta una, se usa la
-    // disponible para ambos estados y se distingue activo/inactivo por opacidad.
-    const onAvail = !!onTex && this.textures.exists(onTex);
-    const offAvail = !!offTex && this.textures.exists(offTex);
-    const hasImg = onAvail || offAvail;
-    const texOn = onAvail ? onTex! : offTex!;
-    const texOff = offAvail ? offTex! : onTex!;
-    const sameTex = texOn === texOff; // solo se subió una imagen
-    const g = hasImg ? undefined : this.add.graphics().setDepth(8);
-    const img = hasImg ? this.add.image(x, y, texOff).setDepth(9) : undefined;
-    if (img) this.fitImage(img, r * 2.3, r * 2.3);
-    const glyphTxt = hasImg
-      ? undefined
-      : this.add
-          .text(x, y - 1, glyph, {
-            fontFamily: "Arial, sans-serif",
-            fontSize: `${Math.round(r * 1.05)}px`,
-            fontStyle: "bold",
-            color: "#c9d3e6",
-          })
-          .setOrigin(0.5)
-          .setDepth(9);
-    this.add
-      .text(x, y + r + 8, caption, {
-        fontFamily: "Arial, sans-serif",
-        fontSize: `${Math.max(9, Math.round(r * 0.42))}px`,
-        fontStyle: "bold",
-        color: "#7a869e",
-      })
-      .setOrigin(0.5)
-      .setDepth(9);
-    const draw = (on: boolean) => {
-      if (img) {
-        img.setTexture(on ? texOn : texOff);
-        this.fitImage(img, r * 2.3, r * 2.3);
-        // Con una sola imagen, el estado activo se distingue por opacidad.
-        img.setAlpha(sameTex && !on ? 0.5 : 1);
-      } else if (g && glyphTxt) {
-        g.clear();
-        g.fillStyle(on ? this.accent : 0x1a2238, on ? 1 : 0.95).fillCircle(x, y, r);
-        g.lineStyle(2, on ? 0xfff2b0 : this.accent, on ? 1 : 0.55).strokeCircle(x, y, r);
-        glyphTxt.setColor(on ? "#3a2a00" : "#c9d3e6");
-      }
-    };
-    draw(false);
-    this.add
-      .zone(x, y, r * 2, r * 2)
-      .setInteractive({ useHandCursor: true })
-      .setDepth(10)
-      .on("pointerdown", onClick);
-    return { setActive: draw };
-  }
 
   private toggleTurbo() {
     this.turbo = !this.turbo;
@@ -3196,28 +2167,12 @@ export class SlotScene extends Phaser.Scene {
     sfx.reelStop();
   }
 
-  // -------------------------------------------------------------------- //
-  // Música                                                                //
-  // -------------------------------------------------------------------- //
   private setupMusic() {
     if (this.cache.audio.exists(TEX.musicTrack)) {
       this.music = this.sound.add(TEX.musicTrack, { loop: true, volume: 0.35 });
     }
-    // CORRECCIÓN 1 (punto 4): en móvil el ícono de SONIDO ya lo dibuja
-    // `buildControlsMobile()` por código (mobileToggleIcon), SIEMPRE — así
-    // los 5 íconos quedan parejos aunque el tema no tenga imágenes de
-    // música subidas. FASE 3 DESKTOP: mismo criterio — el botón de SONIDO
-    // ahora lo dibuja `buildControlsDesktop()` por código. Solo el fallback
-    // de ventana angosta no táctil conserva el botón de imagen de siempre.
-    if (this.portrait && !this.isMobile && this.textures.exists(TEX.musicOn) && this.textures.exists(TEX.musicOff)) {
-      const d = this.musicR * 2.1;
-      this.musicBtn = this.add
-        .image(this.musicX, this.musicY, this.musicMuted ? TEX.musicOff : TEX.musicOn)
-        .setDepth(9)
-        .setInteractive({ useHandCursor: true });
-      this.fitImage(this.musicBtn, d, d);
-      this.musicBtn.on("pointerdown", () => this.toggleMusic());
-    }
+    // El botón de SONIDO lo dibuja el HUD de cada diseño (buildControlsMobile /
+    // DesktopHud), siempre — ver musicToggleMobile / musicToggleDesktop.
   }
 
   private tryStartMusic() {
@@ -3241,8 +2196,6 @@ export class SlotScene extends Phaser.Scene {
     }
     if (this.musicMuted) this.music?.pause();
     else if (this.music) (this.music.isPaused ? this.music.resume() : this.music.play());
-    this.musicBtn?.setTexture(this.musicMuted ? TEX.musicOff : TEX.musicOn);
-    if (this.musicBtn) this.fitImage(this.musicBtn, this.musicR * 2.1, this.musicR * 2.1);
     this.musicToggleMobile?.setActive(!this.musicMuted);
     this.musicToggleDesktop?.setActive(!this.musicMuted);
   }
@@ -3263,6 +2216,11 @@ export class SlotScene extends Phaser.Scene {
   }
 
   private setButtonEnabled(enabled: boolean) {
+    if (this.hud) {
+      // Horizontal: giro y −/+ deshabilitados, brillo apagado, icono rotando.
+      this.hud.setBusy(!enabled);
+      return;
+    }
     this.button.setAlpha(enabled ? 1 : 0.45);
     this.buttonLabel.setAlpha(enabled ? 1 : 0.45);
     // SOLO MÓVIL (Fase 6, regla 1) + FASE 3 DESKTOP: "estado deshabilitado
@@ -3290,10 +2248,17 @@ export class SlotScene extends Phaser.Scene {
 
   private clearTransient() {
     this.winGfx.clear();
-    this.winText.setText("");
+    this.winText?.setText("");
     this.prizeBannerImg?.setVisible(false);
     this.winGroup?.setVisible(true);
-    this.transient.forEach((o) => o.destroy());
+    this.hud?.hideWinBanner();
+    // Phaser NO quita los tweens de un objeto al destruirlo: un tween infinito
+    // (p. ej. el bamboleo del título del BIG WIN) seguía vivo sobre un objeto
+    // muerto tras cada premio. Se quitan antes de destruir (incluidos los hijos).
+    this.transient.forEach((o) => {
+      this.removeTweensDeep(o);
+      o.destroy();
+    });
     this.transient = [];
     this.winCycleTimer?.remove(false);
     this.winCycleTimer = undefined;
@@ -3301,6 +2266,11 @@ export class SlotScene extends Phaser.Scene {
     this.winPulseStops = [];
     this.reels.forEach((r) => r.setAnticipation(false));
     this.hideMascot(true);
+  }
+
+  private removeTweensDeep(o: Phaser.GameObjects.GameObject) {
+    removeTweensOf(this, o);
+    if (o instanceof Phaser.GameObjects.Container) o.list.forEach((c) => this.removeTweensDeep(c));
   }
 
   private column(matrix: string[][], c: number): string[] {
@@ -3318,14 +2288,6 @@ export class SlotScene extends Phaser.Scene {
     this.idleTimer?.remove(false);
     this.clearTransient();
     this.setButtonEnabled(false);
-    // CORRECCIÓN D2 (punto 3, SOLO ESCRITORIO): el texto de ayuda de turbo
-    // se desvanece tras la PRIMERA tirada — en móvil `this.turboHintText`
-    // nunca se asigna, así que esto nunca hace nada ahí.
-    if (this.turboHintText) {
-      this.tweens.add({ targets: this.turboHintText, alpha: 0, duration: 500 });
-      this.turboHintText = undefined;
-    }
-
     sfx.unlock();
     sfx.spin();
     this.tryStartMusic();
@@ -3426,6 +2388,8 @@ export class SlotScene extends Phaser.Scene {
       if (this.isMobile || !this.portrait) this.spinIdlePulse?.resume();
       this.maybeAutoNext();
       this.resetIdleTimer();
+      // Un resize que llegó durante el giro se aplica ahora (ver onDesktopResize).
+      if (this.pendingRelayout) this.onResize(this.scale.gameSize);
     }
   }
 
@@ -3560,6 +2524,7 @@ export class SlotScene extends Phaser.Scene {
       fontFamily: "Arial, sans-serif", fontSize: `${Math.round(Math.min(this.W * 0.05, 34))}px`,
       fontStyle: "bold", color: "#ffffff", stroke: "#000000", strokeThickness: 5,
     }).setOrigin(0.5);
+    this.crisp(t1, t2);
     cont.add([t1, t2]);
     this.transient.push(overlay, cont);
     this.tweens.add({ targets: cont, scale: 1, duration: 500, ease: "Back.easeOut" });
@@ -3585,6 +2550,7 @@ export class SlotScene extends Phaser.Scene {
       fontFamily: "Arial, sans-serif", fontSize: `${Math.round(Math.min(this.W * 0.12, 72))}px`,
       fontStyle: "bold", color: this.accentHex, stroke: "#000000", strokeThickness: 8,
     }).setOrigin(0.5);
+    this.crisp(t1, amount);
     cont.add([t1, amount]);
     this.transient.push(overlay, cont);
     this.tweens.add({ targets: cont, scale: 1, duration: 500, ease: "Back.easeOut" });
@@ -3604,16 +2570,19 @@ export class SlotScene extends Phaser.Scene {
     }
     const label = `🎁 GRATIS: ${this.freeSpinsRemaining}${this.freeMultiplier > 1 ? `  ×${this.freeMultiplier}` : ""}`;
     if (!this.fsBadge) {
-      const y = this.gridY - this.panelPad - 6;
+      const y = this.L ? this.L.fsBadge.cy : this.gridY - this.panelPad - 6;
       const bg = this.add.graphics();
       this.fsBadgeText = this.add.text(0, 0, label, {
         fontFamily: "Arial, sans-serif", fontSize: `${Math.round(Math.min(this.W * 0.026, 20))}px`,
         fontStyle: "bold", color: "#ffffff", stroke: "#000000", strokeThickness: 4,
       }).setOrigin(0.5);
+      this.crisp(this.fsBadgeText);
       const w = this.fsBadgeText.width + 28;
       const h = this.fsBadgeText.height + 12;
+      this.fsBadgeW = w;
       bg.fillStyle(this.accent, 0.95).fillRoundedRect(-w / 2, -h / 2, w, h, 10);
-      this.fsBadge = this.add.container(this.W - w / 2 - 20, y, [bg, this.fsBadgeText]).setDepth(12);
+      const x = this.L ? this.L.fsBadge.right - w / 2 : this.W - w / 2 - 20;
+      this.fsBadge = this.add.container(x, y, [bg, this.fsBadgeText]).setDepth(12);
     } else {
       this.fsBadgeText!.setText(label);
       this.fsBadge!.setScale(1.18);
@@ -3621,19 +2590,19 @@ export class SlotScene extends Phaser.Scene {
     }
   }
 
-  // Tween numérico que va escribiendo "prefix + monto" en un Text (roll-up de
-  // ganancia), con un tick sonoro periódico mientras sube.
-  // CORRECCIÓN 4 (punto 0): `from` es nuevo y opcional (antes siempre 0) —
-  // permite animar un DELTA (p. ej. el crédito de $1,829 a $1,830, no desde
-  // $0 cada vez) sin tocar ninguno de los usos existentes (GANASTE/GANANCIA
-  // siguen pasando solo `to`, que sigue animando desde 0 igual que siempre).
-  private rollUpText(text: Phaser.GameObjects.Text, prefix: string, to: number, duration: number, from = 0) {
+  // Tween numérico que va escribiendo "prefix + monto" (roll-up de ganancia),
+  // con un tick sonoro periódico mientras sube. `from` permite animar un DELTA
+  // (p. ej. el crédito). Horizontal: escrituras con THROTTLE (~30/s) sobre
+  // BitmapText; móvil: igual que siempre (una escritura por frame).
+  private rollUpText(text: TextLike, prefix: string, to: number, duration: number, from = 0) {
     if (to === from) {
       text.setText(prefix + this.money(to));
       return;
     }
     let lastTick = from;
     const step = Math.max(1, Math.abs(to - from) / 14);
+    const minInterval = this.isMobile ? 0 : CONFIG_DESKTOP.text.rollUpIntervalMs;
+    let lastWrite = -Infinity;
     this.tweens.addCounter({
       from,
       to,
@@ -3641,12 +2610,16 @@ export class SlotScene extends Phaser.Scene {
       ease: "Cubic.easeOut",
       onUpdate: (tw) => {
         const v = tw.getValue() ?? from;
-        text.setText(prefix + this.money(Math.round(v)));
+        if (minInterval === 0 || this.time.now - lastWrite >= minInterval) {
+          text.setText(prefix + this.money(Math.round(v)));
+          lastWrite = this.time.now;
+        }
         if (Math.abs(v - lastTick) >= step && v !== to) {
           sfx.tick();
           lastTick = v;
         }
       },
+      onComplete: minInterval ? () => text.setText(prefix + this.money(to)) : undefined,
     });
   }
 
@@ -3711,10 +2684,7 @@ export class SlotScene extends Phaser.Scene {
       // Premio grande en AUTOPLAY (con o sin turbo): se detiene para que el jugador
       // vea la celebración con calma en vez de que la tape el siguiente giro.
       if (this.autoOn) this.stopAuto();
-      // FASE 4 DESKTOP (punto 5): overlay propio para escritorio real — el
-      // fallback de ventana angosta no táctil sigue con bigWin() de siempre.
-      if (!this.portrait) this.bigWinDesktop(resp, tier);
-      else this.bigWin(resp, tier);
+      this.bigWinDesktop(resp, tier);
     } else {
       this.normalWin(resp);
     }
@@ -3852,9 +2822,9 @@ export class SlotScene extends Phaser.Scene {
     // Contador de ganancia con count-up + monedas sutiles (regla 2).
     const total = resp.total_win;
     const prefix = "GANASTE  ";
-    this.winText.setText(prefix + this.money(total)).setScale(1);
-    const baseW = this.winText.width;
-    const baseH = this.winText.height;
+    this.winText!.setText(prefix + this.money(total)).setScale(1);
+    const baseW = this.winText!.width;
+    const baseH = this.winText!.height;
     const fit = Math.min(1, this.winMaxW / Math.max(1, baseW));
 
     if (this.prizeBannerImg) {
@@ -3862,10 +2832,10 @@ export class SlotScene extends Phaser.Scene {
       this.fitImage(this.prizeBannerImg, baseW * fit * 1.5 + 40, baseH * fit * 2.6);
     }
 
-    this.winText.setText(prefix + this.money(0));
-    this.winText.setScale(fit * 0.6);
-    this.tweens.add({ targets: this.winText, scale: fit, duration: 350, ease: "Back.easeOut" });
-    this.rollUpText(this.winText, prefix, total, this.turbo ? 320 : 750);
+    this.winText!.setText(prefix + this.money(0));
+    this.winText!.setScale(fit * 0.6);
+    this.tweens.add({ targets: this.winText!, scale: fit, duration: 350, ease: "Back.easeOut" });
+    this.rollUpText(this.winText!, prefix, total, this.turbo ? 320 : 750);
     this.mobileCoinBurst(this.W / 2, this.winRowY, CONFIG_MOBILE.celebration.coinBurstSmall);
   }
 
@@ -4025,31 +2995,6 @@ export class SlotScene extends Phaser.Scene {
     this.cycleWinLines(resp);
   }
 
-  private normalWin(resp: SpinResponse) {
-    sfx.win();
-    this.winGroup.setVisible(false); // el banner ocupa la zona de GANANCIA
-    this.highlightWins(resp);
-
-    // Escala para que NO se desborde de la rejilla: se mide con el monto final y
-    // luego se reinicia a 0 para el roll-up (así el tamaño no salta al crecer).
-    const total = resp.total_win;
-    const prefix = "GANASTE  ";
-    this.winText.setText(prefix + this.money(total)).setScale(1);
-    const baseW = this.winText.width;
-    const baseH = this.winText.height;
-    const fit = Math.min(1, this.winMaxW / Math.max(1, baseW));
-
-    // El banner de premio (si se subió) aparece detrás del texto, dimensionado a él.
-    if (this.prizeBannerImg) {
-      this.prizeBannerImg.setPosition(this.W / 2, this.bannerY).setVisible(true).setScale(1);
-      this.fitImage(this.prizeBannerImg, baseW * fit * 1.5 + 40, baseH * fit * 2.6);
-    }
-
-    this.winText.setText(prefix + this.money(0));
-    this.winText.setScale(fit * 0.6);
-    this.tweens.add({ targets: this.winText, scale: fit, duration: 350, ease: "Back.easeOut" });
-    this.rollUpText(this.winText, prefix, total, this.turbo ? 320 : 750);
-  }
 
   // Paleta para distinguir combinaciones distintas en la misma tirada: cada
   // símbolo ganador recibe un color estable (mismo símbolo -> mismo color), así
@@ -4232,232 +3177,92 @@ export class SlotScene extends Phaser.Scene {
     this.tweens.add({ targets: this.mascotImg, alpha: 0, duration: 350, ease: "Sine.easeIn" });
   }
 
-  private bigWin(resp: SpinResponse, tier: WinTier) {
-    sfx.bigWin();
-    this.winGroup.setVisible(false);
 
-    // Antes de oscurecer la pantalla con la celebración, se resaltan las figuras
-    // y líneas ganadoras sobre los rieles (igual que en un premio normal) para
-    // que el jugador vea QUÉ combinación disparó el big win.
+
+
+
+
+  // Premio normal (horizontal): banner GANASTE reutilizable sobre el borde
+  // inferior del marco + conteo con throttle. La GANANCIA de la barra ya quedó
+  // actualizada en present().
+  private normalWin(resp: SpinResponse) {
+    sfx.win();
     this.highlightWins(resp);
-    const highlightMs = this.turbo ? 250 : 900;
-    this.time.delayedCall(highlightMs, () => this.celebrateBigWin(resp, tier));
-  }
-
-  private celebrateBigWin(resp: SpinResponse, tier: WinTier) {
-    const cfg = SlotScene.TIER_CFG[tier];
-    this.cameras.main.shake(cfg.shakeMs, cfg.shakeI);
-
-    // Si el tema trae una mascota de "premio grande" (GIF decodificado o imagen
-    // estática), se dibuja DENTRO del canvas con depth entre los rieles y el
-    // oscurecido — TODO (mascota, oscurecido, monedas/confeti, texto) a la vez.
-    const hasMascot = !!this.mascotFrames || !!this.mascotStaticKey;
-    if (hasMascot) this.showMascot(cfg.holdMs + 400);
-
-    const cx = this.W / 2;
-    const cy = this.gridY + this.gridH / 2;
-
-    const overlay = this.add
-      .rectangle(0, 0, this.W, this.H, 0x000000, 0.68)
-      .setOrigin(0)
-      .setDepth(20);
-    this.transient.push(overlay);
-
-    const coins = this.add
-      .particles(0, 0, TEX.coin, {
-        lifespan: 1600,
-        speed: { min: 250, max: 560 },
-        angle: { min: 240, max: 300 },
-        gravityY: 900,
-        scale: { start: 0.9, end: 0.2 },
-        rotate: { min: 0, max: 360 },
-        tint: [this.accent, 0xffe066, 0xffb703],
-        emitting: false,
-      })
-      .setDepth(25);
-    coins.explode(cfg.coins, cx, cy - 40);
-    this.transient.push(coins);
-
-    const confetti = this.add
-      .particles(0, 0, TEX.confetti, {
-        lifespan: 2200,
-        speed: { min: 150, max: 420 },
-        angle: { min: 200, max: 340 },
-        gravityY: 500,
-        scale: { start: 1, end: 0.4 },
-        rotate: { min: 0, max: 360 },
-        tint: [0xef476f, 0x06d6a0, 0x00bbf9, 0x9b5de5, 0xffd23f],
-        emitting: false,
-      })
-      .setDepth(25);
-    confetti.explode(cfg.confetti, cx, cy - 60);
-    this.transient.push(confetti);
-
-    const banner = this.add.container(cx, cy).setDepth(30);
-    const titleText = this.add
-      .text(0, -50, cfg.title, {
-        fontFamily: "Arial, sans-serif",
-        fontSize: `${Math.round(Math.min(this.W * 0.16, 90))}px`,
-        fontStyle: "bold",
-        color: cfg.color,
-        stroke: "#000000",
-        strokeThickness: 8,
-      })
-      .setOrigin(0.5);
-    const amountText = this.add
-      .text(0, 40, this.money(0), {
-        fontFamily: "Arial, sans-serif",
-        fontSize: `${Math.round(Math.min(this.W * 0.12, 68))}px`,
-        fontStyle: "bold",
-        color: "#ffffff",
-      })
-      .setOrigin(0.5);
-    banner.add([titleText, amountText]);
-    banner.setScale(0);
-    this.transient.push(banner);
-
-    this.tweens.add({ targets: banner, scale: 1, duration: 550, ease: "Back.easeOut" });
-    this.tweens.add({ targets: titleText, angle: { from: -4, to: 4 }, duration: 500, yoyo: true, repeat: -1 });
-    this.rollUpText(amountText, "", resp.total_win, cfg.rollMs);
-
-    this.time.delayedCall(cfg.holdMs, () => {
-      this.tweens.add({
-        targets: [overlay, banner],
-        alpha: 0,
-        duration: 400,
-        onComplete: () => this.clearTransient(),
-      });
-    });
+    if (!this.hud) return;
+    this.rollUpText(this.hud.showWinBanner(), "", resp.total_win, this.turbo ? 320 : 750);
   }
 
   // ====================================================================== //
-  // BIG WIN DESKTOP (Fase 4, punto 5) — módulo aislado: solo se llama desde  //
-  // present() cuando !portrait (escritorio real). Mismo cálculo/acreditado  //
-  // del premio que siempre (ya pasó antes de llamar a present()) — solo     //
-  // cómo se anima: texto centrado sobre los rodillos, rayos de luz          //
-  // (receta idéntica a celebrateBigWinMobile, con cuidado de dibujar en     //
-  // LOCAL + setPosition para poder rotarlos sin desplazarlos), monedas,     //
-  // sacudida de cámara, y SALTABLE con clic o ESPACIO. El fallback de       //
-  // ventana angosta no táctil sigue usando bigWin()/celebrateBigWin() de    //
-  // siempre, sin tocar.                                                     //
+  // BIG WIN horizontal — mismo cálculo/acreditación de siempre (ya ocurrió   //
+  // antes de present()); solo cambia cómo se anima: rayos como TEXTURA (no   //
+  // Graphics re-teselado por frame), partículas de emisores persistentes y   //
+  // con tope, y TODOS los tweens infinitos se quitan al terminar. Se salta   //
+  // con clic o ESPACIO.                                                     //
   // ====================================================================== //
   private bigWinDesktop(resp: SpinResponse, tier: WinTier) {
     sfx.bigWin();
-    this.winGroup.setVisible(false);
     this.highlightWins(resp);
     const highlightMs = this.turbo ? 250 : 900;
     this.time.delayedCall(highlightMs, () => this.celebrateBigWinDesktop(resp, tier));
   }
 
-  // Degradados de 3 tonos por nivel — se reutilizan los de CONFIG_MOBILE
-  // (regla 3: "reutiliza los tokens de color del móvil"); el único desajuste
-  // es de NOMBRE ("epic" en WinTier vs "super" en móvil, mismo nivel).
+  // Degradados de 3 tonos por nivel — los de CONFIG_MOBILE ("epic" en WinTier
+  // equivale a "super" en móvil).
   private static readonly DESKTOP_WIN_GRADIENT: Record<WinTier, [string, string, string]> = {
     big: CONFIG_MOBILE.celebration.tiers.big.gradient,
     mega: CONFIG_MOBILE.celebration.tiers.mega.gradient,
     epic: CONFIG_MOBILE.celebration.tiers.super.gradient,
     jackpot: CONFIG_MOBILE.celebration.tiers.jackpot.gradient,
   };
+  private static readonly RAYS_TEX = "tex-rays";
+  private static readonly VIGNETTE_TEX = "tex-vignette";
+  private static readonly BAKED_SUFFIX = "-d";
 
   private celebrateBigWinDesktop(resp: SpinResponse, tier: WinTier) {
     const cfg = SlotScene.TIER_CFG[tier];
     const gradient = SlotScene.DESKTOP_WIN_GRADIENT[tier];
+    const FX = CONFIG_DESKTOP.effects;
+    const OV = CONFIG_DESKTOP.depth.overlays;
     this.winOverlayActive = true;
     this.cameras.main.shake(cfg.shakeMs, cfg.shakeI);
-
-    const hasMascot = !!this.mascotFrames || !!this.mascotStaticKey;
-    if (hasMascot) this.showMascot(cfg.holdMs + 400);
+    if (this.mascotFrames || this.mascotStaticKey) this.showMascot(cfg.holdMs + 400);
 
     const cx = this.W / 2;
     const cy = this.gridY + this.gridH / 2;
-
-    // Punto 5: "que se puedan saltar con clic o espacio" — el overlay ya
-    // cubre toda la pantalla, así que es la zona de clic. DEPTH: en
-    // escritorio el HUD (SPIN, iconos) vive en CONFIG_DESKTOP.depth.hud=30 y
-    // arriba — a diferencia de móvil (cuyo HUD no pasa de ~11), un overlay a
-    // depth 20 quedaría POR DEBAJO del botón de SPIN: un clic durante la
-    // celebración podría disparar un giro nuevo en vez de cerrarla, y
-    // onSpin()->clearTransient() destruiría estos objetos sin pasar por
-    // `finish()` (dejando `dismissTimer`/`raysTween` corriendo sueltos,
-    // apuntando a objetos ya destruidos). Se usa el nivel `overlays` (100),
-    // pensado justo para esto — siempre por encima de todo el HUD.
-    const OV = CONFIG_DESKTOP.depth.overlays;
-    const overlay = this.add
-      .rectangle(0, 0, this.W, this.H, 0x000000, 0.68)
-      .setOrigin(0)
-      .setDepth(OV)
-      .setInteractive();
+    // El overlay cubre todo y está por encima del HUD: el clic cierra la
+    // celebración en vez de disparar un giro nuevo.
+    const overlay = this.add.rectangle(0, 0, this.W, this.H, 0x000000, 0.68).setOrigin(0).setDepth(OV).setInteractive();
     this.transient.push(overlay);
 
-    // Rayos de luz girando detrás del banner — dibujados en LOCAL (0,0) y
-    // luego posicionados con setPosition (si no, el `angle` tweeneado abajo
-    // rotaría alrededor del origen de la escena, no del centro del banner).
-    const rayColor = hexToNum(cfg.color, 0xffd23f);
-    const rays = this.add.graphics().setDepth(OV + 1).setBlendMode(Phaser.BlendModes.ADD);
-    const rayCount = 10;
     const rayLen = Math.max(this.W, this.H) * 0.9;
-    for (let i = 0; i < rayCount; i++) {
-      const a = (i / rayCount) * Math.PI * 2;
-      const spread = Math.PI / rayCount / 2.2;
-      rays.fillStyle(rayColor, 0.14);
-      rays.beginPath();
-      rays.moveTo(0, 0);
-      rays.arc(0, 0, rayLen, a - spread, a + spread, false);
-      rays.closePath();
-      rays.fillPath();
-    }
-    rays.setPosition(cx, cy);
-    const raysTween = this.tweens.add({ targets: rays, angle: 360, duration: 9000, repeat: -1, ease: "Linear" });
+    const rays = this.add
+      .image(cx, cy, SlotScene.RAYS_TEX)
+      .setTint(hexToNum(cfg.color, 0xffd23f))
+      .setBlendMode(Phaser.BlendModes.ADD)
+      .setDisplaySize(rayLen * 2, rayLen * 2)
+      .setAlpha(CONFIG_DESKTOP.effects.raysAlpha)
+      .setDepth(OV + 1);
     this.transient.push(rays);
+    const raysTween = this.tweens.add({ targets: rays, angle: 360, duration: 9000, repeat: -1, ease: "Linear" });
 
-    const coins = this.add
-      .particles(0, 0, TEX.coin, {
-        lifespan: 1600,
-        speed: { min: 250, max: 560 },
-        angle: { min: 240, max: 300 },
-        gravityY: 900,
-        scale: { start: 0.9, end: 0.2 },
-        rotate: { min: 0, max: 360 },
-        tint: [this.accent, 0xffe066, 0xffb703],
-        emitting: false,
-      })
-      .setDepth(OV + 5);
-    coins.explode(cfg.coins, cx, cy - 40);
-    this.transient.push(coins);
+    this.coinFx?.explode(Math.min(FX.maxCoins, Math.round(cfg.coins * FX.particleScale)), cx, cy - 40);
+    this.confettiFx?.explode(Math.min(FX.maxConfetti, Math.round(cfg.confetti * FX.particleScale)), cx, cy - 60);
 
-    const confetti = this.add
-      .particles(0, 0, TEX.confetti, {
-        lifespan: 2200,
-        speed: { min: 150, max: 420 },
-        angle: { min: 200, max: 340 },
-        gravityY: 500,
-        scale: { start: 1, end: 0.4 },
-        rotate: { min: 0, max: 360 },
-        tint: [0xef476f, 0x06d6a0, 0x00bbf9, 0x9b5de5, 0xffd23f],
-        emitting: false,
-      })
-      .setDepth(OV + 5);
-    confetti.explode(cfg.confetti, cx, cy - 60);
-    this.transient.push(confetti);
-
-    // Texto centrado SOBRE LOS RODILLOS (punto 5), degradado dorado/propio
-    // del nivel + contorno (mismo tratamiento "premium" de Fase 2/3).
     const banner = this.add.container(cx, cy).setDepth(OV + 10);
-    const titleText = this.goldGradientText(
-      0, -50, cfg.title, Math.round(Math.min(this.W * 0.07, 90)), "#2b1604", gradient
-    );
-    const amountText = this.goldGradientText(
-      0, 50, this.money(0), Math.round(Math.min(this.W * 0.05, 68)), "#2b1604", gradient
-    );
+    const titleText = this.goldGradientText(0, -56, cfg.title, Math.round(Math.min(this.W * 0.06, 104)), "#2b1604", gradient);
+    this.crisp(titleText);
+    const amountText = this.add
+      .bitmapText(0, 52, CONFIG_DESKTOP.text.bitmapFontKey, this.money(0), 76)
+      .setOrigin(0.5)
+      .setTint(CONFIG_DESKTOP.text.goldTop, CONFIG_DESKTOP.text.goldTop, CONFIG_DESKTOP.text.goldBottom, CONFIG_DESKTOP.text.goldBottom);
     banner.add([titleText, amountText]);
     banner.setScale(0);
     this.transient.push(banner);
 
     this.tweens.add({ targets: banner, scale: 1, duration: 550, ease: "Back.easeOut" });
-    this.tweens.add({ targets: titleText, angle: { from: -4, to: 4 }, duration: 500, yoyo: true, repeat: -1 });
+    const wobble = this.tweens.add({ targets: titleText, angle: { from: -4, to: 4 }, duration: 500, yoyo: true, repeat: -1 });
     this.rollUpText(amountText, "", resp.total_win, cfg.rollMs);
 
-    // Saltar con clic O con espacio — se cierra sola a los `holdMs` si no.
     let finished = false;
     const finish = () => {
       if (finished) return;
@@ -4465,6 +3270,7 @@ export class SlotScene extends Phaser.Scene {
       this.winOverlayActive = false;
       dismissTimer.remove(false);
       raysTween.remove();
+      wobble.remove();
       this.input.keyboard?.off("keydown-SPACE", finish);
       this.tweens.add({
         targets: [overlay, banner, rays],
@@ -4472,6 +3278,7 @@ export class SlotScene extends Phaser.Scene {
         duration: 300,
         onComplete: () => this.clearTransient(),
       });
+      if (this.pendingRelayout) this.onResize(this.scale.gameSize);
     };
     overlay.once("pointerdown", finish);
     this.input.keyboard?.on("keydown-SPACE", finish);
@@ -4488,7 +3295,8 @@ export class SlotScene extends Phaser.Scene {
         wordWrap: { width: this.W - 60 },
       })
       .setOrigin(0.5)
-      .setDepth(9);
+      .setDepth(this.isMobile ? 9 : CONFIG_DESKTOP.depth.winBanner);
+    this.crisp(msg);
     this.transient.push(msg);
     this.time.delayedCall(2500, () => msg.destroy());
   }

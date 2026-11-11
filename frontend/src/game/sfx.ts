@@ -41,6 +41,13 @@ export const sfx = {
   unlock() {
     audio();
   },
+  // Pestaña oculta (solo escritorio): suspende el hilo de audio; se reanuda al volver.
+  suspend() {
+    if (ctx && ctx.state === "running") void ctx.suspend();
+  },
+  resume() {
+    if (ctx && ctx.state === "suspended") void ctx.resume();
+  },
   spin() {
     tone(180, 120, "square", 0.08);
   },

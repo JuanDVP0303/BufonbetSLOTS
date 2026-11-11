@@ -8,6 +8,22 @@ interface Cell {
   bg: Phaser.GameObjects.Image; // fondo de color (solo placeholder)
   sprite: Phaser.GameObjects.Image; // imagen del tema (si el símbolo la tiene)
   label: Phaser.GameObjects.Text;
+  // Caché de lo último que se pintó en la celda: render() solo llama a setCell()
+  // si cambia el símbolo o el estado de "desenfoque" (antes: 25 setCell por frame
+  // aunque el carrete estuviera quieto — y en símbolos sin arte, label.setColor()
+  // regeneraba la textura canvas del texto en CADA frame).
+  sym?: string;
+  blur?: boolean;
+}
+
+/** Opciones del modo escritorio. Móvil no pasa nada y queda exactamente igual. */
+export interface ReelOptions {
+  // false = sin máscara propia: la escena enmascara TODOS los carretes con una sola
+  // máscara (1 pasada de stencil por frame en vez de una por carrete).
+  ownMask?: boolean;
+  // Sufijo de la textura horneada (sombra/contorno pre-renderizados, ver
+  // desktop/assetsDesktop.ts). Si `sym-X<sufijo>` existe, se usa en vez de `sym-X`.
+  textureSuffix?: string;
 }
 
 /**
@@ -32,6 +48,11 @@ export class Reel {
   // cuadrada); en móvil puede ser distinto (celdas 4:5, ver SlotScene.computeLayoutMobile).
   private anticipationOverlay?: Phaser.GameObjects.Image;
   private anticipationTween?: Phaser.Tweens.Tween;
+  private maskG?: Phaser.GameObjects.Graphics;
+  private textureSuffix?: string;
+  // render() sin trabajo si nada cambió desde el último frame.
+  private lastRenderedPos = Number.NaN;
+  private dirty = true;
 
   // SOLO MÓVIL (Fase 4): estado del arranque (tirón hacia atrás + rampa de
   // aceleración) y de turbo/anticipación, usados únicamente en update()/stop()
@@ -65,12 +86,14 @@ export class Reel {
     // ancho (`symbolSize`) — celdas 4:5 en vez de cuadradas. Por defecto es
     // igual a `symbolSize` (celda cuadrada): escritorio no pasa este
     // parámetro y queda exactamente como antes.
-    cellH: number = symbolSize
+    cellH: number = symbolSize,
+    opts: ReelOptions = {}
   ) {
     this.scene = scene;
     this.rows = rows;
     this.size = symbolSize;
     this.cellH = cellH;
+    this.textureSuffix = opts.textureSuffix;
     this.container = scene.add.container(x, topY);
 
     const pool = blurPool && blurPool.length ? blurPool : (SYMBOLS as unknown as string[]);
@@ -112,8 +135,12 @@ export class Reel {
         // pidió quitar. Se reemplaza por un halo OSCURO muy fino (actúa como
         // outline de contacto) + la sombra suave de siempre. preFX es de
         // Phaser 3.60+: se aplica una sola vez por sprite, no en cada setCell.
-        sprite.preFX?.addShadow(0, 0.06, 0.04, 1, 0x000000, 6, 0.5);
-        sprite.preFX?.addGlow(0x1a0f05, 0.5, 0, false, 0.08, 4);
+        // Escritorio (textureSuffix): sombra/contorno ya HORNEADOS en la textura —
+        // sin preFX (cada uno re-renderizaba el sprite por framebuffer en CADA frame).
+        if (!this.textureSuffix) {
+          sprite.preFX?.addShadow(0, 0.06, 0.04, 1, 0x000000, 6, 0.5);
+          sprite.preFX?.addGlow(0x1a0f05, 0.5, 0, false, 0.08, 4);
+        }
         label.setShadow(0, 3, "#000000", 5, true, true);
       }
       const cell = scene.add.container(this.size / 2, 0, [frame, bg, sprite, label]);
@@ -121,11 +148,50 @@ export class Reel {
       this.cells.push({ container: cell, frame, bg, sprite, label });
     }
 
-    const maskG = scene.make.graphics({});
-    maskG.fillStyle(0xffffff);
-    maskG.fillRect(x, topY, this.size, rows * this.cellH);
-    this.container.setMask(maskG.createGeometryMask());
+    if (opts.ownMask !== false) {
+      const maskG = scene.make.graphics({});
+      maskG.fillStyle(0xffffff);
+      maskG.fillRect(x, topY, this.size, rows * this.cellH);
+      this.container.setMask(maskG.createGeometryMask());
+      this.maskG = maskG;
+    }
 
+    this.render();
+  }
+
+  /** Contenedor del carrete (para que la escena lo agrupe bajo una máscara común). */
+  get root(): Phaser.GameObjects.Container {
+    return this.container;
+  }
+
+  /**
+   * Reposiciona/redimensiona el carrete SIN recrearlo (resize de ventana en
+   * escritorio): mismas celdas/sprites, solo cambian posición, tamaños y máscara.
+   */
+  layout(x: number, topY: number, size: number, cellH: number) {
+    this.size = size;
+    this.cellH = cellH;
+    this.container.setPosition(x, topY);
+    const artRatio = this.symbolFx ? 0.82 : 0.9;
+    const artW = Math.round(size * artRatio);
+    const artH = Math.round(cellH * artRatio);
+    const fontSize = Math.round(Math.min(size, cellH) * 0.4);
+    for (const cell of this.cells) {
+      cell.container.x = size / 2;
+      cell.frame.setDisplaySize(size, cellH);
+      cell.bg.setDisplaySize(artW, artH);
+      cell.label.setFontSize(fontSize);
+    }
+    if (this.maskG) {
+      this.maskG.clear();
+      this.maskG.fillStyle(0xffffff);
+      this.maskG.fillRect(x, topY, size, this.rows * cellH);
+    }
+    if (this.anticipationOverlay) {
+      const h = this.rows * cellH;
+      this.anticipationOverlay.setPosition(size / 2, h / 2).setDisplaySize(size * 1.5, h * 1.2);
+    }
+    this.dirty = true;
     this.render();
   }
 
@@ -176,9 +242,20 @@ export class Reel {
       // su forma normal en el siguiente render().
       const blur = this.mobile && this.spinning;
       const sy = blur ? CONFIG_MOBILE.reel.blurScaleY : 1;
+      // Escritorio: textura con sombra/contorno horneados (misma escala visual).
+      let drawKey = texKey;
+      let bakeMul = 1;
+      if (this.textureSuffix) {
+        const bakedKey = texKey + this.textureSuffix;
+        if (this.scene.textures.exists(bakedKey)) {
+          drawKey = bakedKey;
+          const data = (this.scene.textures.get(bakedKey) as unknown as { customData: { bakeScale?: number } }).customData;
+          bakeMul = 1 / (data.bakeScale ?? 1);
+        }
+      }
       cell.sprite
-        .setTexture(texKey)
-        .setScale(fitScale, fitScale * sy)
+        .setTexture(drawKey)
+        .setScale(fitScale * bakeMul, fitScale * sy * bakeMul)
         .setAlpha(blur ? CONFIG_MOBILE.reel.blurAlpha : 1)
         .setVisible(true);
       cell.bg.setVisible(false);
@@ -192,6 +269,8 @@ export class Reel {
   }
 
   render() {
+    if (!this.dirty && this.position === this.lastRenderedPos) return;
+    this.lastRenderedPos = this.position;
     const base = Math.floor(this.position);
     // CORRECCIÓN 4: el desplazamiento vertical es por ALTO de celda, no por
     // ancho (antes usaba `this.size` para ambos ejes, invisible mientras la
@@ -201,12 +280,19 @@ export class Reel {
       const cell = this.cells[i];
       cell.container.y = (i - 1) * this.cellH - off + this.cellH / 2;
       const symbol = this.strip[(((base + (i - 1)) % this.L) + this.L) % this.L];
-      this.setCell(cell, symbol);
+      const blur = this.mobile && this.spinning;
+      if (this.dirty || cell.sym !== symbol || cell.blur !== blur) {
+        this.setCell(cell, symbol);
+        cell.sym = symbol;
+        cell.blur = blur;
+      }
     }
+    this.dirty = false;
   }
 
   startSpin() {
     this.spinning = true;
+    this.dirty = true;
     if (this.mobile) {
       // SOLO MÓVIL (Fase 4, regla 1): reinicia el tirón hacia atrás + rampa de
       // aceleración cada vez que arranca un giro nuevo.
@@ -260,6 +346,7 @@ export class Reel {
   // frenar en seco. Al terminar, un golpe de "impacto" (squash) da sensación de peso.
   stop(target: string[], delayMs: number, durationMs = 650): Promise<void> {
     this.spinning = false;
+    this.dirty = true;
     const base = Math.floor(this.position);
     const s = base + 6 + this.colIndex * 3;
     for (let r = 0; r < this.rows; r++) {

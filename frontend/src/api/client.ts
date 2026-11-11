@@ -15,7 +15,14 @@ interface Options {
   method?: string;
   body?: unknown;
   token?: string | null;
+  // Corta la petición si no responde en este tiempo (ApiError status 0, code
+  // "timeout"). Sin valor = sin límite (comportamiento de siempre).
+  timeoutMs?: number;
 }
+
+/** Timeout de las peticiones de GIRO: si el servidor no responde, la escena
+ *  detiene los rodillos y muestra el error en vez de girar indefinidamente. */
+export const SPIN_TIMEOUT_MS = 30_000;
 
 /**
  * Saca un mensaje legible de CUALQUIER forma de error de DRF:
@@ -51,11 +58,24 @@ export async function apiFetch<T>(path: string, opts: Options = {}): Promise<T> 
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";
   if (opts.token) headers["Authorization"] = `Bearer ${opts.token}`;
 
-  const res = await fetch(`${BASE}/api/v1${path}`, {
-    method: opts.method ?? "GET",
-    headers,
-    body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
-  });
+  const ctrl = opts.timeoutMs ? new AbortController() : null;
+  const timer = ctrl ? window.setTimeout(() => ctrl.abort(), opts.timeoutMs) : undefined;
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/api/v1${path}`, {
+      method: opts.method ?? "GET",
+      headers,
+      body: opts.body !== undefined ? JSON.stringify(opts.body) : undefined,
+      signal: ctrl?.signal,
+    });
+  } catch (err) {
+    if (ctrl?.signal.aborted) {
+      throw new ApiError("El servidor tardó demasiado en responder. Revisa tu conexión e inténtalo de nuevo.", 0, "timeout");
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timer);
+  }
 
   const text = await res.text();
   let data: unknown = null;

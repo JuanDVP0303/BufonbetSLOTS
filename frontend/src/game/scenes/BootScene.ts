@@ -32,6 +32,8 @@ export class BootScene extends Phaser.Scene {
     // respaldo — en cualquier modo (antes solo móvil).
     try {
       await document.fonts.load('700 48px "Baloo 2"');
+      // Escritorio: la fuente bitmap de los montos se hornea con el peso 800.
+      if (!this.registry.get("isTouchDevice")) await document.fonts.load('800 48px "Baloo 2"');
     } catch {
       // Si falla (fuente bloqueada, navegador viejo), seguimos con Arial.
     }

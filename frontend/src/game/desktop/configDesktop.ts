@@ -1,189 +1,220 @@
 /**
- * CONFIG_DESKTOP — único punto de ajuste para todo lo visual/estructural del
- * modo ESCRITORIO (horizontal, no táctil). Cambiar un número aquí cambia el
- * juego en vivo, sin tocar el resto del código. El modo MÓVIL no lee nada de
- * este archivo (ver CONFIG_MOBILE en ../mobile/configMobile.ts).
+ * CONFIG_DESKTOP — ÚNICO punto de ajuste del modo ESCRITORIO / horizontal.
  *
- * A diferencia de móvil, escritorio usa Scale.RESIZE (ver game/config.ts):
- * `this.scale.width/height` SON el tamaño REAL de la ventana en todo momento,
- * no una resolución de diseño fija — por eso no hace falta ningún truco de
- * conversión "diseño -> real" como en móvil. `design` de abajo es solo una
- * PROPORCIÓN de referencia (16:9), usada para acotar la "zona segura" del
- * contenido en monitores ultra anchos — no es una resolución de Phaser.
+ * Todo número visual o estructural del layout horizontal vive aquí; el código
+ * (layoutDesktop.ts, DesktopHud.ts, SlotScene) solo lee estas constantes. El modo
+ * móvil (vertical) NO lee nada de este archivo (ver CONFIG_MOBILE).
+ *
+ * Unidades: "px de diseño". El área base es 1920x1080 (16:9) y Phaser la escala
+ * con Scale.FIT + CENTER_BOTH. El ancho de diseño se adapta a la proporción real
+ * del contenedor entre `aspect.min` y `aspect.max` (así 16:10, 21:9… no dejan
+ * barras); fuera de ese rango, el letterbox lo cubre la capa de fondo DOM
+ * (cover + viñeta, ver SlotGameCanvas/.slot-desktop-shade), nunca barras negras.
  */
 
-// Misma familia tipográfica "cartoon bold" que móvil, para que el HUD de
-// escritorio se sienta parte del mismo juego cuando se le agregue el arte
-// (fases siguientes). Reexportada acá para que el código de escritorio no
-// tenga que importar directo de `mobile/configMobile`.
+// Misma familia tipográfica "cartoon bold" que móvil.
 export { MOBILE_FONT as DESKTOP_FONT } from "../mobile/configMobile";
 
 export const CONFIG_DESKTOP = {
-  // Proporción de referencia (16:9), NO una resolución fija de Phaser — ver
-  // nota arriba. Se usa solo para calcular `maxAspect` de la zona segura.
+  // ---- Área de diseño y adaptación a la proporción del contenedor --------
   design: {
     width: 1920,
     height: 1080,
+    // Ventanas bajas (p. ej. 1280x600): el alto de diseño baja hasta `minHeight`
+    // para que el HUD no quede diminuto. Se busca que la escala CSS final
+    // (alto real / alto de diseño) no baje de `minUiScale`.
+    minHeight: 900,
+    minUiScale: 0.66,
+    // Ancho mínimo de diseño (la barra de control necesita ~1300 + márgenes).
+    minWidth: 1440,
   },
-
-  // Composición vertical, en % de la ALTURA real de la ventana.
-  zones: {
-    logoPct: 0.1, // franja del logo, arriba, centrado sobre los rodillos
-    gridPct: 0.57, // 55-60% pedido — alto disponible para la rejilla 5x3
-    controlBarPct: 0.12, // barra de control, abajo, a todo el ancho de la VENTANA
-    gapMinPct: 0.012, // separación mínima entre zonas (header/etc.)
+  aspect: {
+    min: 4 / 3, // más angosto que esto: letterbox arriba/abajo
+    max: 2.4, // más ancho que esto (32:9…): letterbox a los costados
   },
+  // Contenedor con ancho/alto < este valor (ventana VERTICAL en un PC) → se usa
+  // el diseño móvil (portrait) sin cambios. En dispositivos táctiles siempre es portrait.
+  portraitBelowAspect: 1.0,
+  // Proporción mínima (alto/ancho) del diseño móvil cuando se usa en una ventana
+  // vertical de PC: por debajo, el diseño móvil se letterboxea a los costados.
+  portraitMinHW: 1.6,
 
-  // CORRECCIÓN D2 (punto 3): espacio de GANANCIA — ya NO es un % de `H`
-  // (antes `winBandPct`, una franja que no coincidía con el alto REAL del
-  // texto — en 1280x720 el texto medía ~61px pero la franja reservada era de
-  // apenas 36px, dejando solo ~3px antes de la barra en vez de los 16
-  // pedidos). Ahora son dos huecos EXPLÍCITOS (arriba/abajo del texto) y el
-  // alto del texto se calcula de verdad a partir del tamaño de letra — ver
-  // computeLayoutDesktop() y drawWinInfoDesktop(), que usan la MISMA fórmula.
-  ganancia: {
-    gapAboveFramePx: 24, // entre el borde del marco y la etiqueta GANANCIA
-    gapBelowToBarPx: 16, // entre el monto y la barra
+  // ---- Resolución interna (nitidez vs. coste) -----------------------------
+  // El lienzo se renderiza a `escalaCSS × min(devicePixelRatio, maxDevicePixelRatio)`
+  // (cámara con zoom), con tope de píxeles: así 1366x768 renderiza ~1366x768 (no
+  // 1920x1080) y un 4K/retina no pasa de ~2560x1440.
+  render: {
+    maxDevicePixelRatio: 2,
+    maxBackingPixels: 2560 * 1440,
+    minScale: 0.5,
+    // Histéresis: solo se reasigna el lienzo si la escala cambia más de este % (evita
+    // realocar el buffer de WebGL por diferencias mínimas al redimensionar).
+    minRelativeChange: 0.04,
   },
+  resizeDebounceMs: 100,
+  // Posición vertical (fracción) del HOME del header DOM en horizontal (la misma
+  // que PlayPage usa por defecto). Ver evento "mobile-top-icon-y".
+  headerIconYFrac: 0.06,
 
-  // FASE 2 (punto 2): el marco ya NO usa casi todo el ancho de la zona segura
-  // — deja margen a los lados para los personajes decorativos (Homer, etc.),
-  // detrás del marco. % del ANCHO de la zona segura (`contentW`).
+  // ---- Composición vertical ----------------------------------------------
+  layout: {
+    marginTop: 14,
+    sideMargin: 32,
+    gapFrameToHud: 40, // aire mínimo entre el borde visible del marco y el HUD
+  },
+  logo: {
+    heightPct: 0.13, // alto de la caja del logo, % del alto de diseño
+    maxWidthOfFrame: 0.42, // nunca más ancho que este % del marco
+    maxWidth: 560,
+    overlapPct: 0.2, // % de la caja del logo que se monta sobre el borde superior del marco
+    floatPx: 6, // flotación suave (tween barato, solo transform)
+    sheenEveryMs: 6500, // destello ocasional (sprite ADD, sin postFX)
+  },
   grid: {
-    widthPct: 0.64,
+    heightPct: 0.58, // alto de las celdas, % del alto de diseño (pedido: 55-60%)
+    maxWidthPct: 0.72, // ancho máximo del marco visible, % del ancho de diseño
+    // Marco dibujado por código (temas sin grid_frame): margen alrededor de las celdas.
+    panelPadPct: 0.16, // % del alto de celda
   },
-
-  // FASE 2 (punto 4): estilo del marco de rodillos — mismo lenguaje visual
-  // que el panel de rodillos móvil (azul/morado profundo translúcido + borde
-  // dorado + resplandor interior), con sus propios números.
+  // Marco ilustrado (grid_frame): rectángulo de celdas y caja visible, en fracción
+  // del lienzo del asset. Medidos sobre GRILL.png (1080x798) de Dulce Fiesta; sirven
+  // para cualquier marco que siga ese formato del pack estándar de temas.
+  gridFrame: {
+    inner: { x0: 42 / 1080, y0: 112 / 798, x1: 1019 / 1080, y1: 653 / 798 },
+    visible: { x0: 0 / 1080, y0: 65 / 798, x1: 1075 / 1080, y1: 699 / 798 },
+  },
   frame: {
+    // Panel por código (sin grid_frame): mismo lenguaje que móvil.
     fillTop: 0x241c6b,
     fillBottom: 0x140f3d,
-    fillAlpha: 0.75, // pedido: ~75%
+    fillAlpha: 0.75,
     borderColor: 0xffd23f,
-    borderWidthPx: 7, // pedido: 6-8px reales (escritorio no tiene factor de escala — 1 real = 1 diseño)
-    cornerRadiusPct: 0.1, // % del ancho de celda
+    borderWidthPx: 7,
+    cornerRadiusPct: 0.22, // % del alto de celda
+  },
+  // Personajes decorativos a los lados del marco: solo si el tema trae la imagen
+  // Y hay al menos `minWidth` libres. Nunca bajan del borde superior de la barra.
+  characters: {
+    minWidth: 220,
+    maxWidth: 520,
+    gapToFrame: 16,
+    gapAboveBar: 18,
   },
 
-  // FASE 2 (punto 1): placeholder de personajes decorativos en los márgenes
-  // laterales (Homer, etc.) — hasta que el tema tenga un asset dedicado.
-  // CORRECCIÓN D1 (punto 2): se apagó porque el rectángulo se veía peor que
-  // nada. CORRECCIÓN D2 (punto 4): reactivado con la posición/profundidad
-  // corregidas — fuera del marco, estirado hasta la barra (no solo a la
-  // altura de la rejilla) y con su propio nivel de profundidad (ver
-  // depth.decorChar) para quedar SOBRE el fondo de la barra pero DEBAJO de
-  // sus botones. En 16:9 casi exacto (las 4 resoluciones pedidas) sigue sin
-  // haber margen real donde dibujarlo — eso es correcto, no un bug: ver
-  // `marginW < 60` en drawDesktopDecorCharacters(). Solo aparece en pantallas
-  // más anchas (21:9 en adelante).
-  decorChar: {
-    enabled: true,
-    widthPct: 0.8, // % del margen lateral disponible
+  // ---- Banner "GANASTE" (premio normal) -----------------------------------
+  winBanner: {
+    height: 74,
+    maxWidth: 620,
+    labelSize: 24,
+    valueSize: 46,
   },
 
-  // FASE 2 (punto 1): fondo — menos contraste/saturación, desenfoque suave,
-  // parallax leve con el mouse y "rosquillas" flotantes (placeholder).
-  background: {
-    contrast: -0.12,
-    saturation: -0.18,
-    blurStrength: 0.7,
-    oversizeForParallax: 1.045,
-    parallaxMaxPx: 16,
-    floatingCount: 6,
+  // ---- Barra de control (glass oscuro, centrada) --------------------------
+  bar: {
+    maxWidth: 1300,
+    height: 108,
+    marginBottom: 18,
+    radius: 30,
+    padX: 26,
+    groupGap: 18, // separación mínima entre grupos izquierda/centro/derecha
+    fillTop: 0x2b1150,
+    fillBottom: 0x12062a,
+    fillAlpha: 0.8,
+    borderColor: 0xffffff,
+    borderAlpha: 0.16,
+    borderWidth: 2,
+    highlightAlpha: 0.08,
+    shadowAlpha: 0.28,
+    // Iconos chicos (info, menú, sonido, turbo).
+    iconSize: 58,
+    iconGap: 12,
+    // Autoplay y giro.
+    autoSize: 80,
+    spinRadius: 76,
+    spinLift: 22, // el giro sube este tanto respecto al centro de la barra (sobresale arriba)
+    spinGap: 16, // aire entre AUTO y el giro
+    // Cajas de CRÉDITO / APUESTA / GANANCIA.
+    boxHeight: 74,
+    boxWidth: 180,
+    betBoxWidth: 154,
+    boxGap: 14,
+    betBtnSize: 56,
+    betBtnGap: 6,
+    boxFill: 0x000000,
+    boxFillAlpha: 0.32,
+    boxBorderAlpha: 0.1,
+    labelSize: 19,
+    valueSize: 32,
+  },
+  hint: {
+    text: "MANTÉN ESPACIO PARA TIRADA TURBO",
+    size: 16,
+    gapAboveBar: 14,
+    alpha: 0.55,
   },
 
-  // "Zona segura": el CONTENIDO del juego (logo + rodillos + HUD) nunca es
-  // más ancho que `alto real × maxAspect` — en monitores ultra anchos (21:9)
-  // el contenido se queda centrado en una proporción cómoda; el FONDO (que
-  // sigue pintándose dentro de Phaser, en modo "cover" contra el alto/ancho
-  // REALES — ver drawBackground) se extiende solo, llenando los costados.
-  safeZone: {
-    maxAspect: 1920 / 1080,
+  // ---- Botones -----------------------------------------------------------
+  buttons: {
+    hoverScale: 1.05,
+    pressScale: 0.95,
+    tweenMs: 110,
+    disabledAlpha: 0.4,
+    // Estilo "candy" (botones sin imagen del tema): mismo lenguaje que los
+    // botones reales del pack (cuadrado redondeado verde con borde claro).
+    candyTop: 0x8ce562,
+    candyBottom: 0x3c9f1e,
+    candyOffTop: 0x6c9a52,
+    candyOffBottom: 0x35602a,
+    candyBorder: 0xeaf7e0,
+    activeHaloColor: 0xfff36b, // halo de los toggles ACTIVOS (turbo/auto/sonido)
+    activeHaloAlpha: 0.55,
+    tooltipSize: 15,
+  },
+  spin: {
+    glowAlphaMin: 0.28,
+    glowAlphaMax: 0.62,
+    glowPulseMs: 1400,
+    glowScale: 2.3, // diámetro del resplandor respecto al radio×2
+    busyAlpha: 0.6,
+    busyRotateMs: 900,
   },
 
-  // FASE 3 (punto 1): fondo de la barra de control — azul marino translúcido
-  // (reemplaza el verde con madera del banner del tema, que ya no se dibuja
-  // para escritorio real) a TODO el ancho de la ventana, con degradado
-  // vertical sutil y un filo claro arriba.
-  // CORRECCIÓN D2 (punto 2): ~88% de opacidad (antes 75%) + tonos un poco
-  // más oscuros, para que las rosquillas del fondo no se alcancen a ver a
-  // través de los iconos.
-  controlBar: {
-    fillTop: 0x11234a, // azul marino, algo más claro arriba
-    fillBottom: 0x081630, // mismo tono, más oscuro abajo
-    fillAlpha: 0.88, // pedido: ~88%
-    topBorderColor: 0xffffff,
-    topBorderAlpha: 0.4,
-    topBorderWidthPx: 3,
+  // ---- Texto -------------------------------------------------------------
+  text: {
+    // Fuente bitmap generada en runtime para los números (crédito/apuesta/ganancia):
+    // se hornea a `bakeSize` y se muestra más chica (nítida hasta zoom x2).
+    bitmapFontKey: "hud-digits",
+    bakeSize: 96,
+    rollUpIntervalMs: 33, // throttle del conteo animado (~30 actualizaciones/s)
+    goldTop: 0xfff3c4,
+    goldBottom: 0xffb300,
   },
 
-  // FASE 3: tamaños del HUD de la barra de control, en % de `footerH` (el
-  // alto real de la barra) salvo que se diga lo contrario — todo en px
-  // reales, sin factor de escala (Scale.RESIZE).
-  controls: {
-    // CORRECCIÓN D2 (punto 1): los 3 grupos (izq/centro/der) ya no se reparten
-    // en TODO el ancho de la zona segura — viven dentro de un contenedor de
-    // ancho máximo, centrado, para que no se dispersen en monitores anchos.
-    maxContentW: 1500,
-    sideMarginPct: 0.045, // margen entre ese contenedor y el primer/último botón
-    iconRPct: 0.26, // INFO/MENÚ/SONIDO/AUTO/TURBO
-    iconMinR: 22,
-    betBtnRPct: 0.3, // −/+
-    betBtnMinR: 26, // mínimo ~52px reales de diámetro, mismo piso que móvil
-    spinRPct: 0.68,
-    spinMaxContentWPct: 0.045, // tope del radio del SPIN relativo a la zona segura
-    spinProtrudePct: 0.3, // "sobresale ~30% por encima de la barra"
-    spinSeparationPx: 28, // CORRECCIÓN D2 (punto 1): aire extra entre SPIN y −/+, para que no se pisen
-    pillHPct: 0.64,
-    pillWPct: 0.15, // % de la zona segura
-    pillMaxW: 230,
-    pillGapPct: 0.018, // separación entre pastillas y entre zonas
+  // ---- Efectos (límites de rendimiento) ----------------------------------
+  effects: {
+    particleScale: 0.45, // fracción de las monedas/confeti del nivel de premio
+    maxCoins: 90,
+    maxConfetti: 100,
+    raysTextureSize: 1024,
+    raysAlpha: 0.26,
   },
 
-  // Pantalla completa: botón en pantalla + tecla "F" (F11 es un atajo nativo
-  // del navegador, fuera del control de la página — entrar/salir con F11
-  // igual dispara un resize real, que la escena ya recalcula).
   fullscreen: {
     enabled: true,
     keyCode: "F",
   },
 
-  // Orden de profundidad (depth) de las capas de escritorio, de atrás hacia
-  // adelante — mismo esquema que móvil, para que las fases de arte tengan
-  // dónde apoyarse sin reordenar nada a mano.
-  // CORRECCIÓN D1 (punto 1): jerarquía FIJA, de atrás hacia adelante — la
-  // causa del "velo azul" sobre símbolos/controles era que el RELLENO
-  // translúcido del marco (antes en `frame-1`/`frame-2`, un valor POSITIVO)
-  // quedaba por ENCIMA de los símbolos (depth 0, el default implícito de
-  // Reel.ts — compartido con móvil, no se le pone un valor explícito para no
-  // tocar ese archivo). `frameFill` es ahora NEGATIVO a propósito: el relleno
-  // del marco SIEMPRE atrás de los símbolos; `frame` (el borde dorado) sigue
-  // positivo porque ESE sí va delante, por diseño (enmarca los símbolos).
+  // Profundidades (de atrás hacia adelante).
   depth: {
-    background: -100, // fondo
-    characters: -50, // decoración AMBIENTAL del fondo (rosquillas flotantes)
-    frameFill: -10, // panel translúcido de rodillos (relleno + halo exterior)
-    reels: 0, // símbolos — coincide con el depth 0 implícito de Reel.ts
-    frame: 10, // marco dorado (borde + resplandor interior)
-    effects: 20, // efectos de ganancia
-    hudBar: 25, // fondo de la barra de control
-    // CORRECCIÓN D2 (punto 4): los personajes decorativos (Homer) van en los
-    // márgenes, fuera del marco, estirados hasta la barra — necesitan quedar
-    // POR ENCIMA del fondo de la barra (`hudBar`, si no el 88% de opacidad de
-    // la Corrección D2 punto 2 los tapa del todo) pero DEBAJO de sus botones
-    // (`hud`) para el caso límite de una pantalla tan ancha que el margen se
-    // les cruce con el SPIN/los iconos. Es un nivel DISTINTO de `characters`
-    // (que es para las rosquillas AMBIENTALES, siempre atrás de todo) — estos
-    // sí deben verse por encima de buena parte del HUD.
-    decorChar: 27,
-    hud: 30, // botones y pastillas
-    overlays: 100, // overlays (BIG WIN, etc.)
-  },
-
-  // Modo debug: dibuja el bounding box de cada elemento del HUD de escritorio
-  // registrado (ver SlotScene.debugRegisterBox) y avisa por consola si dos se
-  // intersectan. En falso por defecto.
-  debug: {
-    enabled: false,
+    background: -100,
+    characters: -20,
+    frame: -5,
+    reels: 0,
+    winLines: 5,
+    logo: 8,
+    effects: 20,
+    hud: 30,
+    winBanner: 40,
+    overlays: 100,
   },
 } as const;

@@ -187,6 +187,32 @@ body,
   top: 0;
 }
 
+/* ESCRITORIO: el lienzo (OPACO, con el fondo "cover" + viñeta dibujados dentro)
+   usa Scale.FIT sobre un área de diseño 1920x1080 adaptada a la proporción del
+   contenedor, así que casi nunca sobra espacio. Si sobra (proporciones extremas),
+   se ve este degradado oscuro de la página — nunca barras negras. */
+.slot-canvas-wrap-desktop {
+  background: radial-gradient(ellipse at 50% 40%, #2a0f45 0%, #12051f 62%, #07020d 100%);
+}
+/* RENDIMIENTO (solo escritorio, puntero fino): `backdrop-filter` sobre un canvas
+   que se redibuja a 60 fps obliga al compositor a re-difuminar esa zona en CADA
+   frame. Dentro del juego se cambia por un fondo sólido semitransparente. Móvil
+   (hover: none) conserva su estilo. */
+@media (hover: hover) and (pointer: fine) {
+  .play-shell .hud-icon {
+    backdrop-filter: none;
+    background: rgba(12, 16, 30, 0.72);
+  }
+  .play-shell .modal-overlay {
+    backdrop-filter: none;
+    background: rgba(12, 6, 24, 0.62);
+  }
+  .play-shell .lowbal-overlay {
+    backdrop-filter: none;
+    background: rgba(5, 8, 18, 0.86);
+  }
+}
+
 /* Aviso de "gira tu teléfono" (Fase 1, regla 5): tapa todo el juego mientras un
    móvil esté en horizontal, en vez de deformar el layout vertical. */
 .rotate-overlay {

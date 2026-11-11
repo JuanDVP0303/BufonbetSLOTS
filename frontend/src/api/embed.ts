@@ -1,4 +1,4 @@
-import { apiFetch } from "./client";
+import { apiFetch, SPIN_TIMEOUT_MS } from "./client";
 import type { Paytable, Theme } from "./play";
 import type { SpinResponse } from "./spinApi";
 
@@ -28,4 +28,5 @@ export const embedSpin = (sessionToken: string, betAmount: number) =>
     method: "POST",
     body: { bet_amount: betAmount },
     token: sessionToken,
+    timeoutMs: SPIN_TIMEOUT_MS,
   });
