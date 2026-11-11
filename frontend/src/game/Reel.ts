@@ -24,6 +24,13 @@ export interface ReelOptions {
   // Sufijo de la textura horneada (sombra/contorno pre-renderizados, ver
   // desktop/assetsDesktop.ts). Si `sym-X<sufijo>` existe, se usa en vez de `sym-X`.
   textureSuffix?: string;
+  // Escala del símbolo = "contain" en la celda × este factor (p. ej. 1.08: casi
+  // tocan los bordes de la celda). Sin definir = ajuste de siempre (móvil).
+  symbolScale?: number;
+  // Con símbolos más grandes que la celda, las celdas de la tira justo encima y
+  // debajo de la ventana asomarían un borde en reposo: se ocultan mientras el
+  // carrete está detenido exactamente en una posición entera.
+  hideEdgeCellsAtRest?: boolean;
 }
 
 /**
@@ -50,6 +57,8 @@ export class Reel {
   private anticipationTween?: Phaser.Tweens.Tween;
   private maskG?: Phaser.GameObjects.Graphics;
   private textureSuffix?: string;
+  private symbolScale?: number;
+  private hideEdgeCellsAtRest = false;
   // render() sin trabajo si nada cambió desde el último frame.
   private lastRenderedPos = Number.NaN;
   private dirty = true;
@@ -94,6 +103,8 @@ export class Reel {
     this.size = symbolSize;
     this.cellH = cellH;
     this.textureSuffix = opts.textureSuffix;
+    this.symbolScale = opts.symbolScale;
+    this.hideEdgeCellsAtRest = !!opts.hideEdgeCellsAtRest;
     this.container = scene.add.container(x, topY);
 
     const pool = blurPool && blurPool.length ? blurPool : (SYMBOLS as unknown as string[]);
@@ -232,9 +243,11 @@ export class Reel {
       const heightFit = artH / src.height;
       const areaFit = artH / Math.sqrt(src.width * src.height);
       const maxFit = (this.cellH * 1.1) / src.height;
-      const fitScale = this.symbolFx
-        ? Math.min(Math.max(heightFit, areaFit), maxFit)
-        : Math.min(artW / src.width, artH / src.height);
+      const fitScale = this.symbolScale
+        ? Math.min(this.size / src.width, this.cellH / src.height) * this.symbolScale
+        : this.symbolFx
+          ? Math.min(Math.max(heightFit, areaFit), maxFit)
+          : Math.min(artW / src.width, artH / src.height);
       // SOLO MÓVIL (Fase 4, regla 2): mientras gira, "desenfoque falso" — se
       // estira el símbolo en Y y se le baja el alpha (no hay sprite -blur por
       // símbolo todavía). Reutiliza el mismo `sprite` de siempre: no crea
@@ -276,9 +289,12 @@ export class Reel {
     // ancho (antes usaba `this.size` para ambos ejes, invisible mientras la
     // celda era cuadrada — con celdas 4:5 esto habría girado "raro").
     const off = (this.position - base) * this.cellH;
+    const edgeHidden = this.hideEdgeCellsAtRest && off === 0;
+    const last = this.cells.length - 1;
     for (let i = 0; i < this.cells.length; i++) {
       const cell = this.cells[i];
       cell.container.y = (i - 1) * this.cellH - off + this.cellH / 2;
+      if (this.hideEdgeCellsAtRest) cell.container.setVisible(!(edgeHidden && (i === 0 || i === last)));
       const symbol = this.strip[(((base + (i - 1)) % this.L) + this.L) % this.L];
       const blur = this.mobile && this.spinning;
       if (this.dirty || cell.sym !== symbol || cell.blur !== blur) {

@@ -19,6 +19,7 @@ import {
 } from "../desktop/layoutDesktop";
 import { DesktopHud, removeTweensOf, type TextLike } from "../desktop/DesktopHud";
 import { bakeSymbolTexture, ensureDigitFont, ensureRaysTexture, ensureVignetteTexture } from "../desktop/assetsDesktop";
+import { BakedImage, paintPanelBody, paintPanelLines } from "../desktop/paintDesktop";
 
 /** Botón redondo con estado activo/inactivo (turbo, autoplay). */
 interface Toggle {
@@ -75,8 +76,10 @@ export class SlotScene extends Phaser.Scene {
   private hud?: DesktopHud;
   private reelsRoot?: Phaser.GameObjects.Container;
   private reelsMask?: Phaser.GameObjects.Graphics;
-  private gridFrameImg?: Phaser.GameObjects.Image;
-  private framePanel?: Phaser.GameObjects.Graphics;
+  private panelImg?: BakedImage; // panel de rodillos: cuerpo (vidrio + resplandor), baja resolución
+  private panelLines?: BakedImage; // panel de rodillos: borde fino + filo + divisores, resolución completa
+  private logoFloat: Array<Phaser.GameObjects.Image | Phaser.GameObjects.Text> = []; // flotación del logo (update)
+  private uiK = 1; // horizontal: H / 1080 (tamaños "fijos" heredados); móvil: siempre 1
   private logoCont?: Phaser.GameObjects.Container;
   private logoImg?: Phaser.GameObjects.Image | Phaser.GameObjects.Text;
   private logoSheen?: Phaser.GameObjects.Image;
@@ -226,8 +229,10 @@ export class SlotScene extends Phaser.Scene {
     this.hud = undefined;
     this.reelsRoot = undefined;
     this.reelsMask = undefined;
-    this.gridFrameImg = undefined;
-    this.framePanel = undefined;
+    this.panelImg = undefined;
+    this.panelLines = undefined;
+    this.uiK = 1;
+    this.logoFloat = [];
     this.logoCont = undefined;
     this.logoImg = undefined;
     this.logoSheen = undefined;
@@ -407,11 +412,19 @@ export class SlotScene extends Phaser.Scene {
   }
 
 
-  update(_time: number, dtMs: number) {
+  update(time: number, dtMs: number) {
     // render() no hace nada si el carrete no se movió (ver Reel.render).
     for (const reel of this.reels) {
       reel.update(dtMs);
       reel.render();
+    }
+    // Horizontal: animaciones continuas baratas SIN tweens infinitos (brillo del
+    // GIRAR, giro "ocupado" y flotación del logo: 3-4 asignaciones por frame).
+    if (this.hud) {
+      this.hud.tick(time);
+      const LG = CONFIG_DESKTOP.logo;
+      const y = -this.H * LG.floatPct * (0.5 - 0.5 * Math.cos((time / LG.floatPeriodMs) * Math.PI * 2));
+      for (const o of this.logoFloat) o.y = y;
     }
   }
 
@@ -611,28 +624,31 @@ export class SlotScene extends Phaser.Scene {
       return;
     }
 
-    const frameAsset = this.textures.exists(TEX.gridFrame)
+    // HORIZONTAL: layout "ampliado" (desktop/layoutDesktop.ts). W x H = tamaño CSS
+    // del contenedor; el lienzo lo llena de borde a borde.
+    const logoAsset = this.textures.exists(TEX.logo)
       ? (() => {
-          const src = this.textures.get(TEX.gridFrame).getSourceImage();
+          const src = this.textures.get(TEX.logo).getSourceImage();
           return { width: src.width, height: src.height };
         })()
       : null;
-    const L = computeDesktopLayout(width, height, { cols: this.cols, rows: this.rows, frameAsset });
+    const L = computeDesktopLayout(width, height, { cols: this.cols, rows: this.rows, logoAsset });
     this.L = L;
+    this.uiK = L.ui;
     this.gridX = L.grid.x;
     this.gridY = L.grid.y;
     this.size = L.grid.cellW;
     this.cellH = L.grid.cellH;
     this.gridW = L.grid.w;
     this.gridH = L.grid.h;
-    this.panelPad = L.panelPad;
+    this.panelPad = L.panel.pad;
     this.logoX = L.logo.cx;
     this.logoY = L.logo.cy;
     this.logoMaxW = L.logo.maxW;
     this.logoMaxH = L.logo.maxH;
     this.logoAngle = 0;
-    this.barTop = L.bar.rect.y;
-    this.footerH = L.bar.rect.h;
+    this.barTop = L.H - L.controlsH;
+    this.footerH = L.controlsH;
     this.topInfoY = L.winBanner.cy;
     this.bannerY = L.winBanner.cy;
     this.winMaxW = L.winBanner.maxW;
@@ -695,15 +711,17 @@ export class SlotScene extends Phaser.Scene {
     const bw = Math.round(d.width * k);
     const bh = Math.round(d.height * k);
     if (bw !== this.scale.width || bh !== this.scale.height) this.scale.setGameSize(bw, bh);
-    if (k !== this.renderScale) {
+    const kChanged = k !== this.renderScale;
+    if (kChanged) {
       this.renderScale = k;
-      this.hud?.setTextResolution(k);
       if (this.logoImg instanceof Phaser.GameObjects.Text) this.crisp(this.logoImg);
       if (this.fsBadgeText) this.crisp(this.fsBadgeText);
     }
     this.registry.set("desktopDesign", d);
     this.applyCamera(d.width, d.height);
-    if (d.width !== this.W || d.height !== this.H || !this.L) {
+    // Nuevo tamaño o nueva resolución interna: se reposiciona todo y las piezas
+    // horneadas (panel, botones, cajas) se redibujan a la resolución nueva.
+    if (d.width !== this.W || d.height !== this.H || !this.L || kChanged) {
       this.computeLayout(d.width, d.height);
       this.applyDesktopLayout();
     }
@@ -749,12 +767,14 @@ export class SlotScene extends Phaser.Scene {
     this.prepareDesktopAssets();
 
     const DEPTH = CONFIG_DESKTOP.depth;
-    this.buildCanvasBackground(1);
-    if (this.textures.exists(TEX.gridFrame)) {
-      this.gridFrameImg = this.add.image(0, 0, TEX.gridFrame).setDepth(DEPTH.frame);
-    } else {
-      this.framePanel = this.add.graphics().setDepth(DEPTH.frame);
-    }
+    this.buildCanvasBackground(CONFIG_DESKTOP.background.shadeAlpha);
+    // Panel por código (vidrio morado + borde fino + divisores), horneado en una
+    // textura: reemplaza al marco ilustrado (grid_frame) y a las casillas oscuras.
+    // El grid_frame del tema se sigue usando en el diseño móvil.
+    this.panelImg = new BakedImage(this);
+    this.panelImg.image.setDepth(DEPTH.frame);
+    this.panelLines = new BakedImage(this, 2);
+    this.panelLines.image.setDepth(DEPTH.frame + 1);
     this.buildReels();
     this.winGfx = this.add.graphics().setDepth(DEPTH.winLines);
     this.buildDesktopLogo();
@@ -786,7 +806,8 @@ export class SlotScene extends Phaser.Scene {
   private buildDesktopLogo() {
     const DL = CONFIG_DESKTOP.logo;
     this.logoCont = this.add.container(0, 0).setDepth(CONFIG_DESKTOP.depth.logo);
-    const floatTargets: Phaser.GameObjects.GameObject[] = [];
+    const floatTargets = this.logoFloat;
+    floatTargets.length = 0;
     if (this.textures.exists(TEX.logo)) {
       const img = this.add.image(0, 0, TEX.logo);
       // Destello ocasional: una copia blanca en ADD que aparece/desaparece cada
@@ -811,10 +832,9 @@ export class SlotScene extends Phaser.Scene {
       this.logoImg = title;
       floatTargets.push(title);
     }
-    // Entrada (una vez) + flotación suave (solo transform; muy barata).
+    // Entrada (una vez). La flotación suave se anima en update() (sin tween infinito).
     this.logoCont.setScale(0.6).setAlpha(0);
     this.tweens.add({ targets: this.logoCont, scale: 1, alpha: 1, duration: 550, ease: "Back.easeOut" });
-    this.tweens.add({ targets: floatTargets, y: -DL.floatPx, duration: 1700, yoyo: true, repeat: -1, ease: "Sine.easeInOut" });
   }
 
   private buildDesktopHud() {
@@ -907,8 +927,10 @@ export class SlotScene extends Phaser.Scene {
     if (this.bgImg) {
       const src = this.bgImg.texture.getSourceImage();
       const s = Math.max(W / src.width, H / src.height);
-      // "cover" centrado, con el mismo sesgo vertical que la capa DOM móvil (40%).
-      this.bgImg.setScale(s).setPosition(W / 2, (H - src.height * s) * 0.4 + (src.height * s) / 2);
+      // "cover" (Math.max de las dos escalas). Horizontal: centrado (focusY); ventana
+      // vertical de PC: mismo sesgo que la capa DOM móvil (40%).
+      const focusY = this.isMobile ? 0.4 : CONFIG_DESKTOP.background.focusY;
+      this.bgImg.setScale(s).setPosition(W / 2, (H - src.height * s) * focusY + (src.height * s) / 2);
     }
     this.bgShade?.setPosition(0, 0).setDisplaySize(W, H);
   }
@@ -918,23 +940,20 @@ export class SlotScene extends Phaser.Scene {
     const L = this.L;
     if (!L) return;
     this.layoutCanvasBackground();
-    if (this.gridFrameImg && L.frameImage) {
-      this.gridFrameImg.setPosition(L.frameImage.cx, L.frameImage.cy).setScale(L.frameImage.scale);
-    }
-    if (this.framePanel) this.drawDesktopPanel(this.framePanel, L);
+    this.drawDesktopPanel(L);
     this.reels.forEach((r, c) => r.layout(L.grid.x + c * L.grid.cellW, L.grid.y, L.grid.cellW, L.grid.cellH));
-    this.reelsMask?.clear().fillStyle(0xffffff).fillRect(L.grid.x, L.grid.y, L.grid.w, L.grid.h);
+    this.drawReelsMask();
     // Las rayas de premio se redibujan solas en el siguiente paso del ciclo.
     this.winGfx.clear();
 
     if (this.logoCont && this.logoImg) {
       this.logoCont.setPosition(L.logo.cx, L.logo.cy);
-      if (this.logoImg instanceof Phaser.GameObjects.Image) {
-        const src = this.logoImg.texture.getSourceImage();
-        const s = Math.min(L.logo.maxW / src.width, L.logo.maxH / src.height, 1.25);
-        this.logoImg.setScale(s);
-        this.logoSheen?.setScale(s);
-      }
+      const t = this.logoImg;
+      const baseW = t.width;
+      const baseH = t.height;
+      const sc = Math.min(L.logo.maxW / baseW, L.logo.maxH / baseH, t instanceof Phaser.GameObjects.Image ? 1.25 : 4);
+      t.setScale(sc);
+      this.logoSheen?.setScale(sc);
     }
     for (const side of ["left", "right"] as const) {
       const img = this.charImgs[side];
@@ -948,28 +967,52 @@ export class SlotScene extends Phaser.Scene {
       img.setScale(Math.min(slot.w / src.width, slot.h / src.height));
       img.setPosition(slot.x + slot.w / 2, slot.y + slot.h).setVisible(true);
     }
-    this.hud?.layout(L);
-    if (this.fsBadge) this.fsBadge.setPosition(L.fsBadge.right - this.fsBadgeW / 2, L.fsBadge.cy);
+    this.hud?.layout(L, this.renderScale);
+    if (this.fsBadge) this.layoutFreeSpinsBadge();
   }
 
-  // Panel de rodillos por código (temas SIN grid_frame): relleno translúcido + borde
-  // dorado, estático (sin tween infinito sobre Graphics).
-  private drawDesktopPanel(g: Phaser.GameObjects.Graphics, L: DesktopLayout) {
-    const F = CONFIG_DESKTOP.frame;
-    const { x, y, w, h } = L.frameVisible;
-    const r = Math.round(L.grid.cellH * F.cornerRadiusPct);
-    g.clear();
-    for (let i = 3; i >= 1; i--) {
-      g.fillStyle(F.borderColor, 0.05).fillRoundedRect(x - i * 8, y - i * 8, w + i * 16, h + i * 16, r + i * 6);
+  // Panel de rodillos: vidrio morado semitransparente + borde fino brillante +
+  // divisores sutiles, horneado en DOS texturas (2 quads): el cuerpo suave a baja
+  // resolución y las líneas finas a resolución completa. Se redibujan solo al cambiar
+  // de tamaño o de resolución interna, nunca por frame. Ver desktop/paintDesktop.ts.
+  private drawDesktopPanel(L: DesktopLayout) {
+    if (!this.panelImg || !this.panelLines) return;
+    const P = CONFIG_DESKTOP.panel;
+    const p = L.panel;
+    const glowBlur = L.H * P.glowBlurPct;
+    const spec = {
+      radius: p.radius,
+      border: Math.max(1.5, P.borderWidthPx * L.ui),
+      glowBlur,
+      headerH: p.headerH,
+      pad: p.pad,
+      cols: this.cols,
+      cellW: L.grid.cellW,
+      gridH: L.grid.h,
+    };
+    const state = `${this.cols}|${L.grid.cellW}|${p.headerH}`;
+    this.panelImg.bleed = glowBlur * 2 + spec.border;
+    this.panelImg.draw(p.w, p.h, this.renderScale * P.bodyResolution, state, (ctx, w, h) => paintPanelBody(ctx, w, h, spec));
+    this.panelLines.draw(p.w, p.h, this.renderScale, state, (ctx, w, h) => paintPanelLines(ctx, w, h, spec));
+    const cx = p.x + p.w / 2;
+    const cy = p.y + p.h / 2;
+    this.panelImg.image.setPosition(cx, cy);
+    this.panelLines.image.setPosition(cx, cy);
+  }
+
+  // Máscara ÚNICA de los rodillos = ventana del panel (esquinas inferiores
+  // redondeadas como el panel). Se redibuja solo en el resize, nunca por frame.
+  private drawReelsMask() {
+    const g = this.reelsMask;
+    if (!g) return;
+    g.clear().fillStyle(0xffffff);
+    const L = this.L;
+    if (!L) {
+      g.fillRect(this.gridX, this.gridY, this.gridW, this.gridH);
+      return;
     }
-    g.fillGradientStyle(F.fillTop, F.fillTop, F.fillBottom, F.fillBottom, F.fillAlpha).fillRoundedRect(x, y, w, h, r);
-    g.fillStyle(0xffffff, 0.04).fillRoundedRect(x + 5, y + 5, w - 10, h - 10, Math.max(0, r - 3));
-    g.lineStyle(2, F.borderColor, 0.14);
-    for (let c = 1; c < this.cols; c++) {
-      const cx = L.grid.x + c * L.grid.cellW;
-      g.lineBetween(cx, L.grid.y, cx, L.grid.y + L.grid.h);
-    }
-    g.lineStyle(F.borderWidthPx, F.borderColor, 1).strokeRoundedRect(x, y, w, h, r);
+    const r = L.reelWindow;
+    g.fillRoundedRect(r.x, r.y, r.w, r.h, { tl: 0, tr: 0, bl: r.radiusBottom, br: r.radiusBottom });
   }
 
   // Visibilidad de la pestaña: Phaser ya pausa su loop (Game.onHidden); además se
@@ -1161,7 +1204,7 @@ export class SlotScene extends Phaser.Scene {
     if (desktop) {
       this.reelsRoot = this.add.container(0, 0).setDepth(CONFIG_DESKTOP.depth.reels);
       this.reelsMask = this.make.graphics({});
-      this.reelsMask.fillStyle(0xffffff).fillRect(this.gridX, this.gridY, this.gridW, this.gridH);
+      this.drawReelsMask();
       this.reelsRoot.setMask(this.reelsMask.createGeometryMask());
     }
     for (let c = 0; c < this.cols; c++) {
@@ -1176,9 +1219,16 @@ export class SlotScene extends Phaser.Scene {
         true,
         true,
         this.isMobile,
-        // Alto de celda: 4:5 en móvil; en horizontal, la proporción de las celdas del marco.
+        // Alto de celda: 4:5 en móvil; en horizontal, celdas ~1.3:1 (ver layoutDesktop).
         this.cellH,
-        desktop ? { ownMask: false, textureSuffix: SlotScene.BAKED_SUFFIX } : undefined
+        desktop
+          ? {
+              ownMask: false,
+              textureSuffix: SlotScene.BAKED_SUFFIX,
+              symbolScale: this.L?.symbolScale ?? CONFIG_DESKTOP.grid.symbolScale,
+              hideEdgeCellsAtRest: true,
+            }
+          : undefined
       );
       this.reels.push(reel);
       this.reelsRoot?.add(reel.root);
@@ -2527,7 +2577,8 @@ export class SlotScene extends Phaser.Scene {
     this.crisp(t1, t2);
     cont.add([t1, t2]);
     this.transient.push(overlay, cont);
-    this.tweens.add({ targets: cont, scale: 1, duration: 500, ease: "Back.easeOut" });
+    // Horizontal: escala con el alto real (uiK); móvil: uiK = 1 (sin cambios).
+    this.tweens.add({ targets: cont, scale: this.uiK, duration: 500, ease: "Back.easeOut" });
     this.time.delayedCall(1600, () => {
       this.tweens.add({ targets: [overlay, cont], alpha: 0, duration: 350, onComplete: () => { overlay.destroy(); cont.destroy(); } });
     });
@@ -2553,7 +2604,8 @@ export class SlotScene extends Phaser.Scene {
     this.crisp(t1, amount);
     cont.add([t1, amount]);
     this.transient.push(overlay, cont);
-    this.tweens.add({ targets: cont, scale: 1, duration: 500, ease: "Back.easeOut" });
+    // Horizontal: escala con el alto real (uiK); móvil: uiK = 1 (sin cambios).
+    this.tweens.add({ targets: cont, scale: this.uiK, duration: 500, ease: "Back.easeOut" });
     this.rollUpText(amount, "", total, 1300);
     this.time.delayedCall(2700, () => {
       this.tweens.add({ targets: [overlay, cont], alpha: 0, duration: 350, onComplete: () => { overlay.destroy(); cont.destroy(); } });
@@ -2572,9 +2624,11 @@ export class SlotScene extends Phaser.Scene {
     if (!this.fsBadge) {
       const y = this.L ? this.L.fsBadge.cy : this.gridY - this.panelPad - 6;
       const bg = this.add.graphics();
+      // Horizontal: tamaño proporcional a la franja superior del panel (ver layoutFreeSpinsBadge).
+      const fontPx = this.L ? Math.round(this.L.fsBadge.h * 0.58) : Math.round(Math.min(this.W * 0.026, 20));
       this.fsBadgeText = this.add.text(0, 0, label, {
-        fontFamily: "Arial, sans-serif", fontSize: `${Math.round(Math.min(this.W * 0.026, 20))}px`,
-        fontStyle: "bold", color: "#ffffff", stroke: "#000000", strokeThickness: 4,
+        fontFamily: "Arial, sans-serif", fontSize: `${fontPx}px`,
+        fontStyle: "bold", color: "#ffffff", stroke: "#000000", strokeThickness: Math.max(2, Math.round(fontPx * 0.2)),
       }).setOrigin(0.5);
       this.crisp(this.fsBadgeText);
       const w = this.fsBadgeText.width + 28;
@@ -2583,11 +2637,23 @@ export class SlotScene extends Phaser.Scene {
       bg.fillStyle(this.accent, 0.95).fillRoundedRect(-w / 2, -h / 2, w, h, 10);
       const x = this.L ? this.L.fsBadge.right - w / 2 : this.W - w / 2 - 20;
       this.fsBadge = this.add.container(x, y, [bg, this.fsBadgeText]).setDepth(12);
+      if (this.L) this.layoutFreeSpinsBadge();
     } else {
       this.fsBadgeText!.setText(label);
-      this.fsBadge!.setScale(1.18);
-      this.tweens.add({ targets: this.fsBadge, scale: 1, duration: 220, ease: "Back.easeOut" });
+      const base = this.L ? Math.min(1.6, this.L.fsBadge.h / (this.fsBadgeText!.height + 12)) : 1;
+      this.fsBadge!.setScale(base * 1.18);
+      this.tweens.add({ targets: this.fsBadge, scale: base, duration: 220, ease: "Back.easeOut" });
     }
+  }
+
+  // Horizontal: la insignia vive en la franja superior del panel, a la derecha; al
+  // redimensionar se re-escala (su texto se creó con el alto de franja de entonces).
+  private layoutFreeSpinsBadge() {
+    const L = this.L;
+    if (!L || !this.fsBadge || !this.fsBadgeText) return;
+    const baseH = this.fsBadgeText.height + 12;
+    const sc = Math.min(1.6, L.fsBadge.h / baseH);
+    this.fsBadge.setScale(sc).setPosition(L.fsBadge.right - (this.fsBadgeW * sc) / 2, L.fsBadge.cy);
   }
 
   // Tween numérico que va escribiendo "prefix + monto" (roll-up de ganancia),
@@ -3034,7 +3100,7 @@ export class SlotScene extends Phaser.Scene {
       // REORGANIZACIÓN móvil: sin marco por celda (ver más abajo) — el
       // resplandor+estela de pulseCell ya marca el símbolo ganador solo.
       if (!this.isMobile) {
-        this.winGfx.lineStyle(8, color, 0.95);
+        this.winGfx.lineStyle(this.winLineWidth(), color, 0.95);
         this.frameCell(points[0].x, points[0].y, color);
       }
       return;
@@ -3058,7 +3124,7 @@ export class SlotScene extends Phaser.Scene {
       // resplandor/estela de cada símbolo ya marcan la combinación sin él.
       // Escritorio/fallback conservan el marco de siempre (rama `else`).
     } else {
-      this.winGfx.lineStyle(8, color, 0.95);
+      this.winGfx.lineStyle(this.winLineWidth(), color, 0.95);
       for (let i = 0; i < points.length - 1; i++) {
         this.winGfx.lineBetween(points[i].x, points[i].y, points[i + 1].x, points[i + 1].y);
       }
@@ -3102,14 +3168,23 @@ export class SlotScene extends Phaser.Scene {
     // CUADRADO dentro de una celda más alta, que no llegaba a cubrir el
     // símbolo de arriba a abajo — se veía como un recorte cuadrado en vez
     // de encuadrar la figura completa.
-    this.winGfx.lineStyle(6, color, 0.95);
+    // Horizontal: grosor/margen/radio proporcionales al alto de celda (se ve igual en
+    // 1366x768 y en 2560x1440). frameCell solo se usa en horizontal.
+    const k = this.cellH / CONFIG_DESKTOP.effects.referenceCellH;
+    const inset = 6 * k;
+    this.winGfx.lineStyle(Math.max(2, 6 * k), color, 0.95);
     this.winGfx.strokeRoundedRect(
-      x - this.size / 2 + 6,
-      y - this.cellH / 2 + 6,
-      this.size - 12,
-      this.cellH - 12,
-      16
+      x - this.size / 2 + inset,
+      y - this.cellH / 2 + inset,
+      this.size - inset * 2,
+      this.cellH - inset * 2,
+      16 * k
     );
+  }
+
+  /** Grosor de las rayas de premio en horizontal (proporcional a la celda). */
+  private winLineWidth(): number {
+    return Math.max(3, 8 * (this.cellH / CONFIG_DESKTOP.effects.referenceCellH));
   }
 
   // Configuración por nivel: cuanto más grande el premio, más partículas, más
@@ -3245,11 +3320,18 @@ export class SlotScene extends Phaser.Scene {
     this.transient.push(rays);
     const raysTween = this.tweens.add({ targets: rays, angle: 360, duration: 9000, repeat: -1, ease: "Linear" });
 
-    this.coinFx?.explode(Math.min(FX.maxCoins, Math.round(cfg.coins * FX.particleScale)), cx, cy - 40);
-    this.confettiFx?.explode(Math.min(FX.maxConfetti, Math.round(cfg.confetti * FX.particleScale)), cx, cy - 60);
+    // Todo se diseñó para una celda de `referenceCellH`: distancias, velocidades y
+    // tamaños se escalan con la celda real (mismo aspecto en 1366x768 y 2560x1440).
+    // Los emisores (persistentes) se mueven/escalan en bloque: sus partículas viven
+    // en el espacio local del emisor.
+    const fx = this.cellH / FX.referenceCellH;
+    this.coinFx?.setPosition(cx, cy).setScale(fx);
+    this.confettiFx?.setPosition(cx, cy).setScale(fx);
+    this.coinFx?.explode(Math.min(FX.maxCoins, Math.round(cfg.coins * FX.particleScale)), 0, -40);
+    this.confettiFx?.explode(Math.min(FX.maxConfetti, Math.round(cfg.confetti * FX.particleScale)), 0, -60);
 
     const banner = this.add.container(cx, cy).setDepth(OV + 10);
-    const titleText = this.goldGradientText(0, -56, cfg.title, Math.round(Math.min(this.W * 0.06, 104)), "#2b1604", gradient);
+    const titleText = this.goldGradientText(0, -56, cfg.title, 104, "#2b1604", gradient);
     this.crisp(titleText);
     const amountText = this.add
       .bitmapText(0, 52, CONFIG_DESKTOP.text.bitmapFontKey, this.money(0), 76)
@@ -3259,7 +3341,7 @@ export class SlotScene extends Phaser.Scene {
     banner.setScale(0);
     this.transient.push(banner);
 
-    this.tweens.add({ targets: banner, scale: 1, duration: 550, ease: "Back.easeOut" });
+    this.tweens.add({ targets: banner, scale: fx, duration: 550, ease: "Back.easeOut" });
     const wobble = this.tweens.add({ targets: titleText, angle: { from: -4, to: 4 }, duration: 500, yoyo: true, repeat: -1 });
     this.rollUpText(amountText, "", resp.total_win, cfg.rollMs);
 
@@ -3289,10 +3371,10 @@ export class SlotScene extends Phaser.Scene {
     const msg = this.add
       .text(this.W / 2, this.bannerY, text, {
         fontFamily: "Arial, sans-serif",
-        fontSize: "30px",
+        fontSize: `${Math.round(30 * this.uiK)}px`,
         color,
         align: "center",
-        wordWrap: { width: this.W - 60 },
+        wordWrap: { width: this.W - 60 * this.uiK },
       })
       .setOrigin(0.5)
       .setDepth(this.isMobile ? 9 : CONFIG_DESKTOP.depth.winBanner);

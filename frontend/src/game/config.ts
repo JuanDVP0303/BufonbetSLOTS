@@ -71,7 +71,7 @@ export function makeGameConfig(
   const pw = parent.clientWidth || window.innerWidth;
   const ph = parent.clientHeight || window.innerHeight;
   // Sistema de layout por orientación (ver desktop/layoutDesktop.ts): en táctil
-  // SIEMPRE "portrait" (diseño móvil); en PC, "portrait" solo si la ventana es vertical.
+  // SIEMPRE "portrait" (diseño móvil); en PC, "portrait" solo si ancho/alto < 1.2.
   const layoutMode = chooseLayoutMode(pw, ph, isTouchDevice);
 
   const callbacks: Phaser.Types.Core.CallbacksConfig = {
@@ -114,12 +114,12 @@ export function makeGameConfig(
   const animatedBg =
     (runtime.theme?.background_type === "IMAGE" && !!bgUrl && bgUrl.toLowerCase().endsWith(".gif")) ||
     (runtime.theme?.background_type === "VIDEO" && !!a?.background_video);
-  // Área base 1920x1080 con Scale.FIT + CENTER_BOTH. El ancho/alto de diseño se
-  // adapta a la proporción del contenedor (16:10, 21:9… sin barras) y la
-  // resolución INTERNA sigue a los píxeles reales que ocupa el lienzo (DPR <= 2,
-  // tope de píxeles): la escena compensa con zoom de cámara, así que el layout
-  // siempre se expresa en px de diseño. El letterbox (si lo hay) lo cubre la capa
-  // de fondo DOM, nunca barras negras.
+  // El lienzo LLENA el contenedor de borde a borde (sin letterbox ni márgenes): el
+  // espacio de layout es el tamaño CSS real del contenedor (desktopDesignSize) y,
+  // con Scale.FIT sobre esa misma proporción, el resultado es el de Scale.RESIZE…
+  // pero con resolución INTERNA propia: backing = CSS × min(DPR, 2), con tope de
+  // píxeles (desktopRenderScale). La escena compensa con zoom de cámara, así que el
+  // layout siempre se expresa en px CSS. Cada resize (debounce) recalcula ambos.
   let width: number;
   let height: number;
   if (layoutMode === "portrait") {

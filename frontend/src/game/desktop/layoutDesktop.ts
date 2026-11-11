@@ -3,12 +3,13 @@
  * poder probarlas fuera del navegador.
  *
  *  - chooseLayoutMode(): decide "portrait" (diseño móvil actual, intacto) o
- *    "landscape" (escritorio/horizontal).
- *  - desktopDesignSize() / desktopRenderScale(): resolución de diseño y de render.
- *  - computeDesktopLayout(): TODA la geometría del modo horizontal (marco, logo,
- *    personajes, barra y cada botón) a partir de CONFIG_DESKTOP.
+ *    "landscape" (escritorio/horizontal, W/H >= 1.2).
+ *  - desktopDesignSize() / desktopRenderScale(): espacio de layout (= tamaño CSS
+ *    del contenedor, el lienzo lo llena entero) y resolución interna.
+ *  - computeDesktopLayout(): TODA la geometría del modo horizontal (panel, logo,
+ *    máscara, fila de controles…) a partir de CONFIG_DESKTOP.
  *
- * Coordenadas: px de diseño, origen arriba-izquierda. Los rectángulos son
+ * Coordenadas: px CSS del contenedor, origen arriba-izquierda. Los rectángulos son
  * {x, y, w, h} (esquina superior izquierda); los botones, centro + tamaño.
  */
 import { CONFIG_DESKTOP } from "./configDesktop";
@@ -24,54 +25,59 @@ export interface Rect {
 export interface Spot {
   cx: number;
   cy: number;
-  size: number; // diámetro / lado
-}
-export interface FrameFractions {
-  inner: { x0: number; y0: number; x1: number; y1: number };
-  visible: { x0: number; y0: number; x1: number; y1: number };
+  size: number; // lado / diámetro
 }
 export interface GridSpec {
   cols: number;
   rows: number;
-  // Marco ilustrado (grid_frame del tema): tamaño del asset. null = panel por código.
-  frameAsset: { width: number; height: number } | null;
+  // Tamaño del logo del tema (para su proporción). null = título por texto.
+  logoAsset: { width: number; height: number } | null;
 }
 
 export interface DesktopLayout {
   W: number;
   H: number;
+  ui: number; // H / referenceHeight: escala de tamaños "fijos" heredados
+  controlsH: number;
   grid: { x: number; y: number; w: number; h: number; cellW: number; cellH: number };
-  // Imagen del marco ilustrado (si hay): centro y escala uniforme.
-  frameImage: { cx: number; cy: number; scale: number } | null;
-  frameVisible: Rect; // caja visible del marco (imagen o panel)
-  panelPad: number; // solo panel por código
+  symbolScale: number;
+  panel: Rect & { radius: number; headerH: number; pad: number };
+  // Ventana de los rodillos (máscara): ancho interior del panel y alto de las celdas
+  // + el margen que ocupa un símbolo agrandado (symbolScale). Esquinas inferiores
+  // redondeadas como el panel.
+  reelWindow: Rect & { radiusBottom: number };
   logo: { cx: number; cy: number; maxW: number; maxH: number };
-  winBanner: { cx: number; cy: number; maxW: number; h: number };
-  fsBadge: { right: number; cy: number };
+  winBanner: { cx: number; cy: number; h: number; maxW: number };
+  fsBadge: { right: number; cy: number; h: number };
   characters: { left: Rect | null; right: Rect | null };
-  bar: {
-    rect: Rect;
-    radius: number;
-    hint: { cx: number; cy: number };
+  controls: {
+    k: number; // escala aplicada por falta de ancho (1 = tamaño nominal)
+    rowCy: number;
+    strip: Rect;
+    hint: { cx: number; cy: number; size: number; maxW: number; twoLines: boolean };
     info: Spot;
     menu: Spot;
     sound: Spot;
     turbo: Spot;
     auto: Spot;
     spin: { cx: number; cy: number; r: number };
+    minus: Spot;
+    plus: Spot;
     credit: Rect;
     bet: Rect;
     win: Rect;
-    minus: Spot;
-    plus: Spot;
+    labelSize: number;
+    valueSize: number;
+    tooltipSize: number;
   };
 }
 
 const D = CONFIG_DESKTOP;
+const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
 
 /**
  * "portrait" en dispositivos táctiles (diseño móvil de siempre) o en ventanas de
- * PC más altas que anchas; "landscape" en el resto.
+ * PC con ancho/alto < 1.2; "landscape" en el resto.
  */
 export function chooseLayoutMode(containerW: number, containerH: number, isTouchDevice: boolean): LayoutMode {
   if (isTouchDevice) return "portrait";
@@ -79,26 +85,18 @@ export function chooseLayoutMode(containerW: number, containerH: number, isTouch
   return containerW / containerH < D.portraitBelowAspect ? "portrait" : "landscape";
 }
 
-/** Resolución de diseño horizontal: base 1920x1080 adaptada a la proporción del contenedor. */
+/**
+ * Espacio de layout horizontal = tamaño CSS del contenedor. Con Scale.FIT y la
+ * misma proporción, el lienzo llena el contenedor de borde a borde (como
+ * Scale.RESIZE) pero conservando una resolución interna propia (DPR, ver abajo).
+ */
 export function desktopDesignSize(containerW: number, containerH: number): { width: number; height: number } {
-  const cw = Math.max(1, containerW || D.design.width);
-  const ch = Math.max(1, containerH || D.design.height);
-  const aspect = Math.min(D.aspect.max, Math.max(D.aspect.min, cw / ch));
-  // Ventanas bajas: alto de diseño menor (HUD proporcionalmente más grande).
-  let height = Math.min(D.design.height, Math.max(D.design.minHeight, ch / D.design.minUiScale));
-  let width = height * aspect;
-  if (width < D.design.minWidth) {
-    width = D.design.minWidth;
-    height = width / aspect;
-  }
-  return { width: Math.round(width), height: Math.round(height) };
+  return { width: Math.max(320, Math.round(containerW || 1920)), height: Math.max(240, Math.round(containerH || 1080)) };
 }
 
 /**
- * Escala de render (backing / diseño). Se acerca a los píxeles físicos que de
- * verdad ocupa el lienzo (escala CSS × devicePixelRatio, con DPR ≤ 2) y se acota
- * por presupuesto de píxeles — nunca 4K innecesario, y en pantallas chicas
- * renderiza MENOS que 1920x1080.
+ * Escala de render (backing / layout) = min(devicePixelRatio, 2), acotada por un
+ * presupuesto de píxeles (nunca 4K innecesario).
  */
 export function desktopRenderScale(
   design: { width: number; height: number },
@@ -113,7 +111,7 @@ export function desktopRenderScale(
   return Math.max(R.minScale, Math.min(cssScale * dpr, maxK));
 }
 
-/** Diseño móvil (1080 de ancho) para una ventana VERTICAL de PC. */
+/** Diseño móvil (1080 de ancho) para una ventana de PC vertical o casi cuadrada. */
 export function portraitDesignSize(containerW: number, containerH: number): { width: number; height: number } {
   const hw = containerW > 0 ? containerH / containerW : 16 / 9;
   return { width: 1080, height: Math.round(1080 * Math.max(D.portraitMinHW, hw)) };
@@ -121,189 +119,204 @@ export function portraitDesignSize(containerW: number, containerH: number): { wi
 
 /** Geometría completa del modo horizontal. */
 export function computeDesktopLayout(W: number, H: number, spec: GridSpec): DesktopLayout {
-  const C = D.layout;
-  const B = D.bar;
+  const C = D.controls;
+  const LG = D.logo;
+  const G = D.grid;
+  const P = D.panel;
 
-  // ---- Barra (abajo, centrada, ancho máximo) -----------------------------
-  const barW = Math.min(B.maxWidth, W - C.sideMargin * 2);
-  const barX = (W - barW) / 2;
-  const barBottom = H - B.marginBottom;
-  const barTop = barBottom - B.height;
-  const rowCy = barTop + B.height / 2;
-  const spinR = B.spinRadius;
-  const spinCy = rowCy - B.spinLift;
-  const hintCy = barTop - D.hint.gapAboveBar - D.hint.size / 2;
-  const hudTop = Math.min(spinCy - spinR, hintCy - D.hint.size / 2);
+  // ---- Reservas verticales ---------------------------------------------
+  const controlsH = clamp(H * C.heightPct, C.minPx, C.maxPx);
+  const topPad = H * LG.topPadPct;
+  const pad = Math.round(H * P.padPct);
+  const bannerH = H * D.winBanner.heightPct;
+  // Entre el panel y la fila: el banner GANASTE va montado sobre el borde inferior
+  // del panel, así que su mitad inferior necesita sitio (nunca pisa el GIRAR).
+  const gapToControls = Math.max(H * P.gapToControlsPct, bannerH / 2 + H * 0.006);
+  const controlsTop = H - controlsH;
 
-  // ---- Marco + celdas ----------------------------------------------------
-  const frame = spec.frameAsset;
-  const F = D.gridFrame;
-  let cellAspect = 1; // ancho/alto de celda
-  // Márgenes del marco visible respecto al rectángulo de celdas, como fracción
-  // del ancho (izq/der) o alto (arriba/abajo) de ese rectángulo.
-  let decoL = 0, decoR = 0, decoT = 0, decoB = 0;
-  if (frame) {
-    const innerW = (F.inner.x1 - F.inner.x0) * frame.width;
-    const innerH = (F.inner.y1 - F.inner.y0) * frame.height;
-    cellAspect = innerW / spec.cols / (innerH / spec.rows);
-    decoL = ((F.inner.x0 - F.visible.x0) * frame.width) / innerW;
-    decoR = ((F.visible.x1 - F.inner.x1) * frame.width) / innerW;
-    decoT = ((F.inner.y0 - F.visible.y0) * frame.height) / innerH;
-    decoB = ((F.visible.y1 - F.inner.y1) * frame.height) / innerH;
+  // ---- Logo: ~27% del ancho, con tope de alto --------------------------
+  const logoAspect = spec.logoAsset ? spec.logoAsset.width / spec.logoAsset.height : 3.1;
+  let logoW = W * LG.widthPct;
+  let logoH = logoW / logoAspect;
+  if (logoH > H * LG.maxHeightPct) {
+    logoH = H * LG.maxHeightPct;
+    logoW = logoH * logoAspect;
   }
-  const gridAspect = (spec.cols * cellAspect) / spec.rows;
+  const logoAbove = logoH * (1 - LG.overPanelPct); // parte del logo por encima del panel
+  // Franja superior del panel (bajo la mitad inferior del logo): las celdas empiezan
+  // debajo, salvo la fracción `overCellsPct` que se permite invadir.
+  const headerH = Math.max(pad, logoH * (LG.overPanelPct - LG.overCellsPct) + H * LG.gapToCellsPct);
+  // logoOverlap = todo lo que el logo le quita al alto de las celdas.
+  const logoOverlap = logoAbove + headerH;
 
-  const logoH = H * D.logo.heightPct;
-  const logoTop = C.marginTop;
-  // Altura vertical disponible para el marco VISIBLE (logo montado sobre su borde).
-  const frameVisTopMin = logoTop + logoH * (1 - D.logo.overlapPct);
-  const frameVisBottomMax = hudTop - C.gapFrameToHud;
-  const availVisH = frameVisBottomMax - frameVisTopMin;
-
-  // Alto de celdas: objetivo % de H, acotado por el alto y por el ancho máximo.
-  let innerH = H * D.grid.heightPct;
-  if (frame) {
-    innerH = Math.min(innerH, availVisH / (1 + decoT + decoB));
-  } else {
-    // panel por código: pad = panelPadPct * cellH por lado
-    const padF = (2 * D.grid.panelPadPct) / spec.rows;
-    innerH = Math.min(innerH, availVisH / (1 + padF));
-  }
-  const maxVisW = W * D.grid.maxWidthPct;
-  const visWPerInnerW = frame ? 1 + decoL + decoR : 1 + (2 * D.grid.panelPadPct) / (spec.cols * cellAspect);
-  if (innerH * gridAspect * visWPerInnerW > maxVisW) innerH = maxVisW / visWPerInnerW / gridAspect;
-
-  const cellH = Math.floor(innerH / spec.rows);
-  const cellW = Math.floor(cellH * cellAspect);
+  // ---- Celdas ----------------------------------------------------------
+  // availW = W * 0.82; availH = H - controlsH - topPad - logoOverlap (- márgenes).
+  const availW = W * G.widthPct;
+  const availH = H - controlsH - gapToControls - topPad - logoOverlap - pad;
+  let cellW = availW / spec.cols;
+  let cellH = availH / spec.rows;
+  // Celdas más anchas que altas, sin pasar de 1.3:1 (se usa el menor: no deforma).
+  cellW = Math.min(cellW, cellH * G.cellAspectMax);
+  cellH = Math.floor(Math.min(cellH, cellW / G.cellAspectMin));
+  cellW = Math.floor(Math.min(cellW, cellH * G.cellAspectMax));
   const gridW = cellW * spec.cols;
   const gridH = cellH * spec.rows;
-  const panelPad = frame ? 0 : Math.round(cellH * D.grid.panelPadPct);
 
-  const visTopOff = frame ? gridH * decoT : panelPad;
-  const visBotOff = frame ? gridH * decoB : panelPad;
-  const visLeftOff = frame ? gridW * decoL : panelPad;
-  const visRightOff = frame ? gridW * decoR : panelPad;
-  const frameVisH = gridH + visTopOff + visBotOff;
+  // ---- Panel: centrado; bloque logo+panel centrado en el alto libre -----
+  const panelW = gridW + pad * 2;
+  const panelH = headerH + gridH + pad;
+  const regionTop = topPad;
+  const regionBottom = controlsTop - gapToControls;
+  const slack = Math.max(0, regionBottom - regionTop - (logoAbove + panelH));
+  const blockTop = regionTop + slack / 2;
+  const panelY = Math.round(blockTop + logoAbove);
+  const gridX = Math.round((W - gridW) / 2);
+  const gridY = panelY + Math.round(headerH);
+  const panelX = gridX - pad;
+  const radius = Math.round(cellH * P.radiusPct);
+  const panel = { x: panelX, y: panelY, w: panelW, h: gridY - panelY + gridH + pad, radius, headerH: gridY - panelY, pad };
 
-  // Logo + marco como un bloque, centrado verticalmente en el espacio libre.
-  const slack = Math.max(0, availVisH - frameVisH);
-  const frameVisTop = frameVisTopMin + slack / 2;
-  const gridY = Math.round(frameVisTop + visTopOff);
-  const gridX = Math.round((W - (gridW + visRightOff - visLeftOff)) / 2);
-  const frameVisible: Rect = {
-    x: gridX - visLeftOff,
-    y: gridY - visTopOff,
-    w: gridW + visLeftOff + visRightOff,
-    h: frameVisH,
+  // Máscara: el símbolo agrandado puede asomar `bleed` por arriba/abajo de las celdas,
+  // pero nunca fuera del panel (ni dentro de la franja del logo más de eso).
+  const border = Math.max(1.5, P.borderWidthPx * (H / D.referenceHeight));
+  const bleed = Math.min(pad, Math.ceil((cellH * (G.symbolScale - 1)) / 2) + 2);
+  const reelWindow = {
+    x: panelX + border,
+    y: gridY - bleed,
+    w: panelW - border * 2,
+    h: gridH + bleed + Math.max(bleed, pad - border),
+    radiusBottom: Math.max(0, radius - border),
   };
 
-  let frameImage: DesktopLayout["frameImage"] = null;
-  if (frame) {
-    const scale = gridW / ((F.inner.x1 - F.inner.x0) * frame.width);
-    const dispW = frame.width * scale;
-    const dispH = frame.height * scale;
-    frameImage = {
-      cx: gridX - F.inner.x0 * frame.width * scale + dispW / 2,
-      cy: gridY - F.inner.y0 * frame.height * scale + dispH / 2,
-      scale,
-    };
-  }
-
-  // Logo: centrado sobre el marco, montado sobre su borde superior (su borde
-  // superior nunca queda por encima de `marginTop`: frameVisTop >= frameVisTopMin).
-  const logoMaxW = Math.min(D.logo.maxWidth, frameVisible.w * D.logo.maxWidthOfFrame);
-  const logo = {
-    cx: frameVisible.x + frameVisible.w / 2,
-    cy: frameVisible.y - logoH * (0.5 - D.logo.overlapPct),
-    maxW: logoMaxW,
-    maxH: logoH,
+  const logo = { cx: W / 2, cy: panelY - logoAbove + logoH / 2, maxW: logoW, maxH: logoH };
+  const winBanner = { cx: W / 2, cy: panel.y + panel.h, h: bannerH, maxW: gridW * D.winBanner.maxWidthOfGrid };
+  const fsBadge = {
+    right: panelX + panelW - pad * 2,
+    cy: panelY + panel.headerH / 2,
+    h: Math.min(panel.headerH * 0.72, H * D.fsBadge.heightPct),
   };
 
-  // Banner GANASTE: sobre el borde inferior visible del marco (no tapa celdas).
-  const winBanner = {
-    cx: W / 2,
-    cy: frameVisible.y + frameVisible.h,
-    maxW: Math.min(D.winBanner.maxWidth, frameVisible.w * 0.6),
-    h: D.winBanner.height,
-  };
+  // ---- Fila de controles ----------------------------------------------
+  const controls = layoutControls(W, H, controlsH);
 
-  // ---- Grupos de la barra ------------------------------------------------
-  const icon = B.iconSize;
-  const gap = B.iconGap;
-  const info: Spot = { cx: barX + B.padX + icon / 2, cy: rowCy, size: icon };
-  const menu: Spot = { cx: info.cx + icon + gap, cy: rowCy, size: icon };
-  const sound: Spot = { cx: menu.cx + icon + gap, cy: rowCy, size: icon };
-  const leftEnd = sound.cx + icon / 2;
-
-  const spin = { cx: barX + barW - B.padX - spinR, cy: spinCy, r: spinR };
-  const auto: Spot = { cx: spin.cx - spinR - B.spinGap - B.autoSize / 2, cy: rowCy, size: B.autoSize };
-  const turbo: Spot = { cx: auto.cx - B.autoSize / 2 - gap - icon / 2, cy: rowCy, size: icon };
-  const rightStart = turbo.cx - icon / 2;
-
-  // Centro: CRÉDITO | − APUESTA + | GANANCIA. Si no cabe, se encogen las cajas.
-  const room = rightStart - leftEnd - B.groupGap * 2;
-  const fixedW = B.boxGap * 2 + (B.betBtnSize + B.betBtnGap) * 2;
-  const wantBoxes = B.boxWidth * 2 + B.betBoxWidth;
-  const k = Math.min(1, Math.max(0.5, (room - fixedW) / wantBoxes));
-  const boxW = B.boxWidth * k;
-  const betW = B.betBoxWidth * k;
-  const centerW = fixedW + boxW * 2 + betW;
-  const minCx = leftEnd + B.groupGap + centerW / 2;
-  const maxCx = rightStart - B.groupGap - centerW / 2;
-  const centerCx = Math.min(maxCx, Math.max(minCx, barX + barW / 2));
-  const boxY = rowCy - B.boxHeight / 2;
-  let x = centerCx - centerW / 2;
-  const credit: Rect = { x, y: boxY, w: boxW, h: B.boxHeight };
-  x += boxW + B.boxGap;
-  const minus: Spot = { cx: x + B.betBtnSize / 2, cy: rowCy, size: B.betBtnSize };
-  x += B.betBtnSize + B.betBtnGap;
-  const bet: Rect = { x, y: boxY, w: betW, h: B.boxHeight };
-  x += betW + B.betBtnGap;
-  const plus: Spot = { cx: x + B.betBtnSize / 2, cy: rowCy, size: B.betBtnSize };
-  x += B.betBtnSize + B.boxGap;
-  const win: Rect = { x, y: boxY, w: boxW, h: B.boxHeight };
-
-  // ---- Personajes: a los lados del marco, sin bajar a la barra -----------
+  // ---- Personajes: a los lados del panel, sin bajar a la fila -----------
   const CH = D.characters;
-  const charTop = frameVisible.y;
-  const charBottom = barTop - CH.gapAboveBar;
-  const leftW = Math.min(CH.maxWidth, frameVisible.x - CH.gapToFrame - C.sideMargin);
-  const rightX0 = frameVisible.x + frameVisible.w + CH.gapToFrame;
-  const rightW = Math.min(CH.maxWidth, W - C.sideMargin - rightX0);
+  const gap = H * CH.gapPct;
+  const side = W * C.sidePct;
+  const minW = H * CH.minWidthPct;
+  const maxW = H * CH.maxWidthPct;
+  const charTop = panelY;
+  const charBottom = controlsTop - gap;
+  const leftW = Math.min(maxW, panelX - gap - side);
+  const rightX0 = panelX + panelW + gap;
+  const rightW = Math.min(maxW, W - side - rightX0);
   const characters = {
-    left:
-      leftW >= CH.minWidth
-        ? { x: frameVisible.x - CH.gapToFrame - leftW, y: charTop, w: leftW, h: charBottom - charTop }
-        : null,
-    right: rightW >= CH.minWidth ? { x: rightX0, y: charTop, w: rightW, h: charBottom - charTop } : null,
+    left: leftW >= minW ? { x: panelX - gap - leftW, y: charTop, w: leftW, h: charBottom - charTop } : null,
+    right: rightW >= minW ? { x: rightX0, y: charTop, w: rightW, h: charBottom - charTop } : null,
   };
 
   return {
     W,
     H,
+    ui: H / D.referenceHeight,
+    controlsH,
     grid: { x: gridX, y: gridY, w: gridW, h: gridH, cellW, cellH },
-    frameImage,
-    frameVisible,
-    panelPad,
+    symbolScale: G.symbolScale,
+    panel,
+    reelWindow,
     logo,
     winBanner,
-    fsBadge: { right: frameVisible.x + frameVisible.w - 12, cy: frameVisible.y + 4 },
+    fsBadge,
     characters,
-    bar: {
-      rect: { x: barX, y: barTop, w: barW, h: B.height },
-      radius: B.radius,
-      hint: { cx: W / 2, cy: hintCy },
-      info,
-      menu,
-      sound,
-      turbo,
-      auto,
-      spin,
-      credit,
-      bet,
-      win,
-      minus,
-      plus,
-    },
+    controls,
+  };
+}
+
+/**
+ * Una sola fila abajo:  INFO MENÚ SONIDO · CRÉDITO · − APUESTA + · GIRAR · AUTO TURBO · GANANCIA
+ * Tamaños = fracciones de controlsH; CRÉDITO y GANANCIA anclados a % del ancho;
+ * −/APUESTA/+ y AUTO/TURBO pegados al GIRAR (centrado). Si a lo ancho no cabe, todo
+ * se reduce con un único factor `k` (nunca se solapan).
+ */
+function layoutControls(W: number, H: number, c: number): DesktopLayout["controls"] {
+  const C = D.controls;
+  const margin = W * C.sidePct;
+  const half = W / 2 - margin;
+  // Ancho que necesita cada mitad (en unidades de controlsH, a k = 1).
+  const leftUnits =
+    C.icon * 3 + C.iconGap * 2 + C.groupGap + C.boxW + C.groupGap + C.betBtn * 2 + C.betBtnGap * 2 + C.betBoxW + C.spinGap + C.spinD / 2;
+  const rightUnits = C.spinD / 2 + C.spinGap + C.auto + C.iconGap + C.icon + C.groupGap + C.boxW;
+  const k = clamp(Math.min(1, half / (c * leftUnits), half / (c * rightUnits)), C.minScale, 1);
+  const s = (u: number) => u * c * k;
+
+  const rowCy = H - c * C.rowCyFromBottom;
+  const spinR = s(C.spinD) / 2;
+  const spin = { cx: W / 2, cy: H - c * C.spinCyFromBottom, r: spinR };
+
+  // Izquierda del GIRAR: + APUESTA − (de derecha a izquierda).
+  const plus: Spot = { cx: spin.cx - spinR - s(C.spinGap) - s(C.betBtn) / 2, cy: rowCy, size: s(C.betBtn) };
+  const betRight = plus.cx - s(C.betBtn) / 2 - s(C.betBtnGap);
+  const boxH = s(C.boxH);
+  const boxY = rowCy - boxH / 2;
+  const bet: Rect = { x: betRight - s(C.betBoxW), y: boxY, w: s(C.betBoxW), h: boxH };
+  const minus: Spot = { cx: bet.x - s(C.betBtnGap) - s(C.betBtn) / 2, cy: rowCy, size: s(C.betBtn) };
+
+  // Extremo izquierdo: INFO MENÚ SONIDO.
+  const icon = s(C.icon);
+  const info: Spot = { cx: margin + icon / 2, cy: rowCy, size: icon };
+  const menu: Spot = { cx: info.cx + icon + s(C.iconGap), cy: rowCy, size: icon };
+  const sound: Spot = { cx: menu.cx + icon + s(C.iconGap), cy: rowCy, size: icon };
+
+  // CRÉDITO: anclado a % del ancho, acotado entre los iconos y el "−".
+  const boxW = s(C.boxW);
+  const creditLo = sound.cx + icon / 2 + s(C.groupGap);
+  const creditHi = minus.cx - s(C.betBtn) / 2 - s(C.groupGap) - boxW;
+  const creditX = creditHi >= creditLo ? clamp(W * C.creditCx - boxW / 2, creditLo, creditHi) : (creditLo + creditHi) / 2;
+  const credit: Rect = { x: creditX, y: boxY, w: boxW, h: boxH };
+
+  // Derecha del GIRAR: AUTO TURBO, y GANANCIA anclada a % del ancho.
+  const autoSize = s(C.auto);
+  const auto: Spot = { cx: spin.cx + spinR + s(C.spinGap) + autoSize / 2, cy: rowCy, size: autoSize };
+  const turbo: Spot = { cx: auto.cx + autoSize / 2 + s(C.iconGap) + icon / 2, cy: rowCy, size: icon };
+  const turboRight = turbo.cx + icon / 2;
+  const winLo = turboRight + s(C.groupGap);
+  const winHi = W - margin - boxW;
+  const winX = winHi >= winLo ? clamp(W * C.winCx - boxW / 2, winLo, winHi) : (winLo + winHi) / 2;
+  const win: Rect = { x: winX, y: boxY, w: boxW, h: boxH };
+
+  // Ayuda de turbo: integrada (2 líneas) entre TURBO y GANANCIA si cabe; si no, una
+  // línea discreta encima de CRÉDITO, en el aire entre el panel y la fila.
+  const hintSize = c * D.hint.size;
+  const longest = Math.max(...D.hint.lines.map((l) => l.length));
+  const twoLineW = longest * hintSize * 0.6;
+  const room = win.x - turboRight - s(C.groupGap) * 0.6;
+  let hint: DesktopLayout["controls"]["hint"];
+  if (room >= twoLineW) {
+    hint = { cx: (turboRight + win.x) / 2, cy: rowCy, size: hintSize, maxW: room, twoLines: true };
+  } else {
+    const size = hintSize * 0.9;
+    hint = { cx: credit.x + credit.w / 2, cy: (H - c + boxY) / 2, size, maxW: credit.w * 1.6, twoLines: false };
+  }
+
+  const stripH = c * C.stripHeight;
+  return {
+    k,
+    rowCy,
+    strip: { x: 0, y: H - stripH, w: W, h: stripH },
+    hint,
+    info,
+    menu,
+    sound,
+    turbo,
+    auto,
+    spin,
+    minus,
+    plus,
+    credit,
+    bet,
+    win,
+    labelSize: boxH * C.labelSize,
+    valueSize: boxH * C.valueSize,
+    tooltipSize: c * D.buttons.tooltipSize,
   };
 }

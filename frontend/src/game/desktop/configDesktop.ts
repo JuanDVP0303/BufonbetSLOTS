@@ -5,152 +5,147 @@
  * (layoutDesktop.ts, DesktopHud.ts, SlotScene) solo lee estas constantes. El modo
  * móvil (vertical) NO lee nada de este archivo (ver CONFIG_MOBILE).
  *
- * Unidades: "px de diseño". El área base es 1920x1080 (16:9) y Phaser la escala
- * con Scale.FIT + CENTER_BOTH. El ancho de diseño se adapta a la proporción real
- * del contenedor entre `aspect.min` y `aspect.max` (así 16:10, 21:9… no dejan
- * barras); fuera de ese rango, el letterbox lo cubre la capa de fondo DOM
- * (cover + viñeta, ver SlotGameCanvas/.slot-desktop-shade), nunca barras negras.
+ * Unidades: el espacio de layout horizontal es el TAMAÑO CSS REAL del contenedor
+ * (W x H en px CSS): el lienzo lo llena de borde a borde, sin letterbox. Casi todo
+ * se expresa como fracción de W, de H, de la altura de controles (`controls`) o
+ * del alto de celda, así que el juego se ve igual en 1366x768 que en 2560x1440.
+ * La nitidez la da la resolución interna (render), independiente del layout.
  */
 
 // Misma familia tipográfica "cartoon bold" que móvil.
 export { MOBILE_FONT as DESKTOP_FONT } from "../mobile/configMobile";
 
 export const CONFIG_DESKTOP = {
-  // ---- Área de diseño y adaptación a la proporción del contenedor --------
-  design: {
-    width: 1920,
-    height: 1080,
-    // Ventanas bajas (p. ej. 1280x600): el alto de diseño baja hasta `minHeight`
-    // para que el HUD no quede diminuto. Se busca que la escala CSS final
-    // (alto real / alto de diseño) no baje de `minUiScale`.
-    minHeight: 900,
-    minUiScale: 0.66,
-    // Ancho mínimo de diseño (la barra de control necesita ~1300 + márgenes).
-    minWidth: 1440,
-  },
-  aspect: {
-    min: 4 / 3, // más angosto que esto: letterbox arriba/abajo
-    max: 2.4, // más ancho que esto (32:9…): letterbox a los costados
-  },
-  // Contenedor con ancho/alto < este valor (ventana VERTICAL en un PC) → se usa
-  // el diseño móvil (portrait) sin cambios. En dispositivos táctiles siempre es portrait.
-  portraitBelowAspect: 1.0,
+  // Contenedor con ancho/alto < este valor → diseño móvil (portrait) sin cambios.
+  // En dispositivos táctiles siempre es portrait.
+  portraitBelowAspect: 1.2,
   // Proporción mínima (alto/ancho) del diseño móvil cuando se usa en una ventana
-  // vertical de PC: por debajo, el diseño móvil se letterboxea a los costados.
+  // de PC casi cuadrada: por debajo, el diseño móvil se letterboxea a los costados.
   portraitMinHW: 1.6,
+  // Alto de referencia: los tamaños "fijos" heredados (fuentes de avisos, trazos)
+  // se multiplican por H / referenceHeight.
+  referenceHeight: 1080,
 
   // ---- Resolución interna (nitidez vs. coste) -----------------------------
-  // El lienzo se renderiza a `escalaCSS × min(devicePixelRatio, maxDevicePixelRatio)`
-  // (cámara con zoom), con tope de píxeles: así 1366x768 renderiza ~1366x768 (no
-  // 1920x1080) y un 4K/retina no pasa de ~2560x1440.
+  // Backing = tamaño CSS × min(devicePixelRatio, maxDevicePixelRatio), con tope de
+  // píxeles (cámara con zoom): 1366x768 renderiza 1366x768 y un 4K/retina no pasa
+  // de ~2560x1440.
   render: {
     maxDevicePixelRatio: 2,
     maxBackingPixels: 2560 * 1440,
     minScale: 0.5,
-    // Histéresis: solo se reasigna el lienzo si la escala cambia más de este % (evita
-    // realocar el buffer de WebGL por diferencias mínimas al redimensionar).
+    // Histéresis: solo se cambia la escala si varía más de este % (evita realocar el
+    // buffer de WebGL por diferencias mínimas al redimensionar).
     minRelativeChange: 0.04,
   },
   resizeDebounceMs: 100,
-  // Posición vertical (fracción) del HOME del header DOM en horizontal (la misma
-  // que PlayPage usa por defecto). Ver evento "mobile-top-icon-y".
+  // Posición vertical (fracción) del HOME del header DOM en horizontal.
   headerIconYFrac: 0.06,
 
-  // ---- Composición vertical ----------------------------------------------
-  layout: {
-    marginTop: 14,
-    sideMargin: 32,
-    gapFrameToHud: 40, // aire mínimo entre el borde visible del marco y el HUD
-  },
-  logo: {
-    heightPct: 0.13, // alto de la caja del logo, % del alto de diseño
-    maxWidthOfFrame: 0.42, // nunca más ancho que este % del marco
-    maxWidth: 560,
-    overlapPct: 0.2, // % de la caja del logo que se monta sobre el borde superior del marco
-    floatPx: 6, // flotación suave (tween barato, solo transform)
-    sheenEveryMs: 6500, // destello ocasional (sprite ADD, sin postFX)
-  },
-  grid: {
-    heightPct: 0.58, // alto de las celdas, % del alto de diseño (pedido: 55-60%)
-    maxWidthPct: 0.72, // ancho máximo del marco visible, % del ancho de diseño
-    // Marco dibujado por código (temas sin grid_frame): margen alrededor de las celdas.
-    panelPadPct: 0.16, // % del alto de celda
-  },
-  // Marco ilustrado (grid_frame): rectángulo de celdas y caja visible, en fracción
-  // del lienzo del asset. Medidos sobre GRILL.png (1080x798) de Dulce Fiesta; sirven
-  // para cualquier marco que siga ese formato del pack estándar de temas.
-  gridFrame: {
-    inner: { x0: 42 / 1080, y0: 112 / 798, x1: 1019 / 1080, y1: 653 / 798 },
-    visible: { x0: 0 / 1080, y0: 65 / 798, x1: 1075 / 1080, y1: 699 / 798 },
-  },
-  frame: {
-    // Panel por código (sin grid_frame): mismo lenguaje que móvil.
-    fillTop: 0x241c6b,
-    fillBottom: 0x140f3d,
-    fillAlpha: 0.75,
-    borderColor: 0xffd23f,
-    borderWidthPx: 7,
-    cornerRadiusPct: 0.22, // % del alto de celda
-  },
-  // Personajes decorativos a los lados del marco: solo si el tema trae la imagen
-  // Y hay al menos `minWidth` libres. Nunca bajan del borde superior de la barra.
-  characters: {
-    minWidth: 220,
-    maxWidth: 520,
-    gapToFrame: 16,
-    gapAboveBar: 18,
+  // ---- Fondo --------------------------------------------------------------
+  background: {
+    focusY: 0.5, // "cover" centrado (0 = arriba, 1 = abajo)
+    shadeAlpha: 0.7, // viñeta horneada encima del fondo (legibilidad)
   },
 
-  // ---- Banner "GANASTE" (premio normal) -----------------------------------
-  winBanner: {
-    height: 74,
-    maxWidth: 620,
-    labelSize: 24,
-    valueSize: 46,
-  },
-
-  // ---- Barra de control (glass oscuro, centrada) --------------------------
-  bar: {
-    maxWidth: 1300,
-    height: 108,
-    marginBottom: 18,
-    radius: 30,
-    padX: 26,
-    groupGap: 18, // separación mínima entre grupos izquierda/centro/derecha
-    fillTop: 0x2b1150,
-    fillBottom: 0x12062a,
-    fillAlpha: 0.8,
-    borderColor: 0xffffff,
-    borderAlpha: 0.16,
-    borderWidth: 2,
-    highlightAlpha: 0.08,
-    shadowAlpha: 0.28,
-    // Iconos chicos (info, menú, sonido, turbo).
-    iconSize: 58,
-    iconGap: 12,
-    // Autoplay y giro.
-    autoSize: 80,
-    spinRadius: 76,
-    spinLift: 22, // el giro sube este tanto respecto al centro de la barra (sobresale arriba)
-    spinGap: 16, // aire entre AUTO y el giro
-    // Cajas de CRÉDITO / APUESTA / GANANCIA.
-    boxHeight: 74,
-    boxWidth: 180,
-    betBoxWidth: 154,
-    boxGap: 14,
-    betBtnSize: 56,
-    betBtnGap: 6,
-    boxFill: 0x000000,
-    boxFillAlpha: 0.32,
-    boxBorderAlpha: 0.1,
-    labelSize: 19,
-    valueSize: 32,
+  // ---- Fila de controles (abajo, superpuesta al juego) ---------------------
+  // controlsH = clamp(H * heightPct, minPx, maxPx). El resto de medidas de la fila
+  // son fracciones de controlsH (× `k`, que solo baja de 1 si no cabe a lo ancho).
+  controls: {
+    heightPct: 0.13,
+    minPx: 70,
+    maxPx: 130,
+    sidePct: 0.022, // margen lateral, fracción de W
+    rowCyFromBottom: 0.46, // centro de la fila (cajas/botones chicos), desde abajo
+    minScale: 0.55,
+    icon: 0.5, // info, menú, sonido, turbo
+    iconGap: 0.12,
+    auto: 0.58,
+    spinD: 0.94, // diámetro del GIRAR (sobresale por arriba del resto de la fila)
+    spinCyFromBottom: 0.53,
+    spinGap: 0.14, // aire entre GIRAR y sus vecinos
+    boxH: 0.56,
+    boxW: 1.72, // CRÉDITO / GANANCIA
+    betBoxW: 1.26,
+    betBtn: 0.46, // − / +
+    betBtnGap: 0.05,
+    groupGap: 0.24,
+    // Anclas horizontales (fracción de W) de CRÉDITO y GANANCIA; −/APUESTA/+ y
+    // AUTO/TURBO van pegados al GIRAR, que está centrado.
+    creditCx: 0.24,
+    winCx: 0.8,
+    labelSize: 0.21, // fracción del alto de caja
+    valueSize: 0.42,
+    // Franja casi transparente detrás de la fila (degradado de abajo hacia arriba).
+    stripHeight: 1.35, // × controlsH
+    stripAlpha: 0.5,
   },
   hint: {
-    text: "MANTÉN ESPACIO PARA TIRADA TURBO",
-    size: 16,
-    gapAboveBar: 14,
-    alpha: 0.55,
+    lines: ["MANTÉN ESPACIO", "PARA TIRADA TURBO"],
+    size: 0.105, // fracción de controlsH
+    alpha: 0.6,
+  },
+
+  // ---- Logo (arriba, centrado, montado sobre el borde superior del panel) ---
+  logo: {
+    topPadPct: 0.04, // aire arriba, fracción de H
+    widthPct: 0.27, // ancho objetivo, fracción de W
+    maxHeightPct: 0.14, // tope de alto, fracción de H
+    overPanelPct: 0.5, // fracción del logo que cae SOBRE el panel
+    // Fracción del logo que puede invadir la fila superior de símbolos. 0 = el logo
+    // se monta sobre una franja superior del panel y nunca tapa símbolos.
+    overCellsPct: 0,
+    gapToCellsPct: 0.004, // aire entre el logo y las celdas, fracción de H
+    floatPct: 0.006, // flotación suave, fracción de H (animada en update, sin tween)
+    floatPeriodMs: 3400,
+    sheenEveryMs: 6500, // destello ocasional (sprite ADD, sin postFX)
+  },
+
+  // ---- Rodillos -----------------------------------------------------------
+  grid: {
+    widthPct: 0.82, // ancho objetivo de las celdas, fracción de W
+    cellAspectMax: 1.3, // ancho/alto máximo de celda
+    cellAspectMin: 1.0, // ancho/alto mínimo (nunca más altas que anchas)
+    symbolScale: 1.08, // símbolo = "contain" en la celda × este factor
+  },
+  // Panel por código detrás de los rodillos (reemplaza al marco ilustrado y a las
+  // casillas oscuras): vidrio morado + borde fino brillante + divisores sutiles.
+  panel: {
+    padPct: 0.014, // margen panel↔celdas, fracción de H
+    radiusPct: 0.1, // radio de esquinas, fracción del alto de celda
+    fillTop: "#4a1d8f",
+    fillBottom: "#250b55",
+    fillAlpha: 0.62,
+    borderColor: "#ff8fe0",
+    borderWidthPx: 2.5, // a H=1080 (escala con H, mínimo 1.5)
+    glowColor: "rgba(255,110,220,0.55)",
+    glowBlurPct: 0.012, // resplandor exterior del borde, fracción de H
+    innerLineAlpha: 0.22, // filo blanco interior
+    dividerAlpha: 0.16,
+    dividerColor: "255,190,245",
+    gapToControlsPct: 0.01, // aire mínimo entre el panel y la fila de controles
+    // El cuerpo (degradado + resplandor, todo suave) se hornea a esta fracción de la
+    // resolución interna: rellenos grandes con degradado en canvas son caros.
+    bodyResolution: 0.35,
+  },
+  // Personajes decorativos a los lados del panel: solo si el tema trae la imagen
+  // Y hay al menos `minWidthPct` × H libres (en 16:9 no hay sitio; en 21:9 sí).
+  characters: {
+    minWidthPct: 0.2,
+    maxWidthPct: 0.48,
+    gapPct: 0.012,
+  },
+
+  // ---- Banner "GANASTE" (premio normal): sobre el borde inferior del panel ---
+  winBanner: {
+    heightPct: 0.046, // fracción de H
+    maxWidthOfGrid: 0.5,
+    labelSize: 0.42, // fracción del alto del banner
+    valueSize: 0.66,
+  },
+  // Insignia de tiradas gratis: en la franja superior del panel, a la derecha.
+  fsBadge: {
+    heightPct: 0.036,
   },
 
   // ---- Botones -----------------------------------------------------------
@@ -159,22 +154,33 @@ export const CONFIG_DESKTOP = {
     pressScale: 0.95,
     tweenMs: 110,
     disabledAlpha: 0.4,
-    // Estilo "candy" (botones sin imagen del tema): mismo lenguaje que los
-    // botones reales del pack (cuadrado redondeado verde con borde claro).
-    candyTop: 0x8ce562,
-    candyBottom: 0x3c9f1e,
-    candyOffTop: 0x6c9a52,
-    candyOffBottom: 0x35602a,
-    candyBorder: 0xeaf7e0,
+    // Estilo "caramelo" (botones sin imagen del tema): mismo lenguaje que los
+    // botones reales del pack (cuadrado redondeado verde, borde claro, brillo).
+    candyTop: "#9df06a",
+    candyBottom: "#3a9a1c",
+    candyOffTop: "#73a65a",
+    candyOffBottom: "#35602a",
+    candyBorder: "#effbe6",
+    activeGlyph: "#fff36b",
     activeHaloColor: 0xfff36b, // halo de los toggles ACTIVOS (turbo/auto/sonido)
     activeHaloAlpha: 0.55,
-    tooltipSize: 15,
+    tooltipSize: 0.13, // fracción de controlsH
+  },
+  // Cajas CRÉDITO / APUESTA / GANANCIA: pastilla de caramelo morada.
+  box: {
+    fillTop: "#7b33c9",
+    fillBottom: "#3a0f78",
+    fillAlpha: 0.92,
+    borderColor: "#ff8fe0",
+    shadowAlpha: 0.35,
+    glossAlpha: 0.2,
+    labelColors: { credit: "#b6f56b", bet: "#ffd23f", win: "#ff9fdc" },
   },
   spin: {
     glowAlphaMin: 0.28,
     glowAlphaMax: 0.62,
-    glowPulseMs: 1400,
-    glowScale: 2.3, // diámetro del resplandor respecto al radio×2
+    glowPulseMs: 1400, // animado en update (sin tween infinito)
+    glowScale: 2.1, // diámetro del resplandor respecto al diámetro del botón
     busyAlpha: 0.6,
     busyRotateMs: 900,
   },
@@ -197,6 +203,8 @@ export const CONFIG_DESKTOP = {
     maxConfetti: 100,
     raysTextureSize: 1024,
     raysAlpha: 0.26,
+    // Las celebraciones se diseñaron para este alto de celda: se escalan con cellH.
+    referenceCellH: 235,
   },
 
   fullscreen: {
